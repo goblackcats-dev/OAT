@@ -88,20 +88,49 @@ class D2L:
 
 
 def logged_in(d2l):
-    res = d2l.page.evaluate(FETCH_JS, d2l.base + "/d2l/api/lp/1.0/users/whoami")
+    try:
+        res = d2l.page.evaluate(FETCH_JS, d2l.base + "/d2l/api/lp/1.0/users/whoami")
+    except Exception:
+        return None
     return res["body"] if res["status"] == 200 else None
+
+
+def diagnose(page, base):
+    """Print whether this computer can reach the login servers (helps with VPN/campus-only SSO)."""
+    import socket
+    from urllib.parse import urlparse
+    hosts = {urlparse(base).hostname, "adfs.jalc.edu"}
+    try:
+        hosts.add(urlparse(page.url).hostname)
+    except Exception:
+        pass
+    for h in sorted(x for x in hosts if x):
+        try:
+            ip = socket.gethostbyname(h)
+            s = socket.create_connection((h, 443), timeout=6)
+            s.close()
+            print(f"  network check: {h} -> {ip}, port 443 reachable")
+        except Exception as e:
+            print(f"  network check: {h} NOT reachable from this computer ({e})")
 
 
 def try_auto_login(d2l, login):
     """Fill the standard D2L login form. Returns True if the session became logged in."""
     page = d2l.page
     try:
-        user = page.locator("input[name='userName'], input#userName, input[type='text'][name*='user' i]").first
-        pwd = page.locator("input[type='password']").first
-        user.wait_for(timeout=8000)
+        # Works for the Microsoft ADFS page (#userNameInput / #passwordInput) and the plain D2L form.
+        user = page.locator("#userNameInput, input[name='UserName'], input[name='userName'], "
+                            "input#userName, input[type='email'], input[name='loginfmt']").first
+        pwd = page.locator("#passwordInput, input[type='password']").first
+        user.wait_for(timeout=15000)
         user.fill(login["u"])
+        pwd.wait_for(timeout=5000)
         pwd.fill(login["p"])
-        pwd.press("Enter")
+        submit = page.locator("#submitButton, input[type='submit'], button[type='submit']").first
+        if submit.count():
+            submit.click()
+        else:
+            pwd.press("Enter")
     except Exception:
         return False
     end = time.time() + 25
@@ -122,7 +151,9 @@ def ensure_login(d2l, login=None, minutes=10):
         print("Logging in with the saved login...")
         if try_auto_login(d2l, login):
             return logged_in(d2l), "auto"
-        print("Automatic login did not complete (changed password, MFA, or a different login page).")
+        print("Automatic login did not complete (changed password, MFA, or a login page I don't recognize).")
+        print("  current page:", d2l.page.url[:120])
+        diagnose(d2l.page, d2l.base)
     print("Please finish logging in in the browser window (waiting up to %d minutes)..." % minutes)
     end = time.time() + minutes * 60
     while time.time() < end:

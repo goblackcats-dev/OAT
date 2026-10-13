@@ -39,6 +39,7 @@ def prompt(base, current=None):
         return None
     try:
         save(base, u, p)
+        print("Login saved to the OS credential vault.")
     except Exception as e:
-        print("Could not save to the credential vault (%s). You'll be asked to log in by hand." % e)
+        print("NOT saved (%s). Using it for this run only." % e)
     return {"u": u, "p": p}

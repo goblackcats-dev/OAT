@@ -95,7 +95,6 @@ def main():
     if a.set_login or login is None:
         if a.set_login or ask_yn("Save your D2L login on this computer (OS credential vault) so it signs in automatically?", True):
             login = creds.prompt(base, login)
-            print("Login saved." if login else "No login saved.")
         if a.set_login:
             return
 
