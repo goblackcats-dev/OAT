@@ -42,8 +42,9 @@ def combine(results, primary=0):
     seen, merged = set(), []
     for lab, r in results:
         for x in r.get("review", []):
-            if x["id"] not in seen:
-                seen.add(x["id"])
+            key = (x["id"], x["reason"])
+            if key not in seen:
+                seen.add(key)
                 merged.append(x)
     out["review"] = merged
     out["courses_scored"] = [lab for lab, _ in results]
