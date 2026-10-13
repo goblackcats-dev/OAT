@@ -368,22 +368,51 @@ def analyze(d):
         weeks = {monday(x) for x in dates}
         span = (monday(end) - monday(start)).days // 7 + 1
         frac = min(1.0, len(weeks) / max(1, span))
-        put("6.01", grade_fraction(frac, 0.8, 0.3), f"auto: announcements in {len(weeks)} of {span} weeks (cannot judge whether they are substantive)")
+        def _words(n):
+            return len(re.sub("<[^>]+>", " ", _t(n.get("Body"))).split())
+        long_ = sum(1 for n in c.news if _words(n) >= 45)
+        put("6.01", grade_fraction(frac, 0.8, 0.3),
+            f"auto: announcements in {len(weeks)} of {span} weeks; {long_} of {len(c.news)} are over 45 words (likelier content, not just reminders)")
         review("6.01", "Check that announcements are content-related, not just logistics/reminders.")
     elif c.news:
         put("6.01", "0", f"auto: only {len(c.news)} announcement(s)")
     else:
         put("6.01", "X", "auto: no announcements")
-    review("6.02", "Monitoring student progress / outreach is not visible in D2L data.")
+    tools = {(l.get("text") or "").strip() for l in (d.get("nav") or {}).get("links", [])}
+    has_ra = any(re.search("retention alert", t, re.I) for t in tools)
+    review("6.02", "Outreach to inactive or at-risk students is not visible in D2L data." +
+           (" The Retention Alert tool is available in the course; whether you use it is for you to confirm." if has_ra else ""))
     kw("6.03", r"office hours|ask the instructor|q&a|virtual office|drop.?in")
     kw("6.04", r"zoom|teams|webex|live (session|class)|mini.?lesson|lecture|tutorial|video")
     review("6.04", "Posted lectures alone do NOT count; confirm there is live interaction or a lecture + instructor-led discussion.")
     rubrics = sum(1 for x in c.dropbox if (x.get("Assessment") or {}).get("Rubrics"))
-    if c.dropbox:
-        put("6.05", "1" if rubrics else "0", f"auto: rubrics on {rubrics}/{len(c.dropbox)} dropboxes; personal feedback not visible")
-    review("6.05", "Personal (non-automated) feedback needs a look at graded submissions.")
-    kw("6.06", r"question|ask|help|q&a", " ".join(x.get("Name") or "" for x in c.forums + c.forum_topics), "forum names")
-    review("6.07", "Instructor replies in discussions need to be checked in the forum.")
+    subs = sum(x.get("TotalUsersWithSubmissions") or 0 for x in c.dropbox)
+    fbk = sum(x.get("TotalUsersWithFeedback") or 0 for x in c.dropbox)
+    if c.dropbox and subs:
+        put("6.05", "1" if fbk / subs >= 0.9 else "0" if fbk else "X",
+            f"auto: feedback given on {fbk} of {subs} dropbox submissions; rubrics on {rubrics}/{len(c.dropbox)} dropboxes (quiz and exam feedback not visible)")
+    elif c.dropbox:
+        put("6.05", "1" if rubrics else "0", f"auto: rubrics on {rubrics}/{len(c.dropbox)} dropboxes; no submissions to measure feedback")
+    review("6.05", "Check that the feedback is personal (written, audio, video, rubric comments), not only a grade.")
+    acts = [(t, t.get("_activity")) for t in c.forum_topics if t.get("_activity")]
+    n_topics = len(acts)
+    with_inst = [t for t, x in acts if x["instructor_posts"] > 0]
+    replies = sum(x["instructor_replies"] for _, x in acts)
+    total_inst = sum(x["instructor_posts"] for _, x in acts)
+    if n_topics:
+        weeks_inst = {dt.date.fromisoformat(x) - dt.timedelta(days=dt.date.fromisoformat(x).weekday())
+                      for _, a_ in acts for x in a_["instructor_dates"]}
+        put("6.07", grade_fraction(len(with_inst) / n_topics, 0.8, 0.01),
+            f"auto: you posted in {len(with_inst)} of {n_topics} discussion topics ({total_inst} posts, {replies} replies) across {len(weeks_inst)} weeks; "
+            "counts only, quality not judged")
+        if replies:
+            put("6.06", "1", f"auto: {replies} instructor replies in discussions (answering student posts)")
+        else:
+            kw("6.06", r"question|ask|help|q&a", " ".join(x.get("Name") or "" for x in c.forums + c.forum_topics), "forum names")
+    else:
+        kw("6.06", r"question|ask|help|q&a", " ".join(x.get("Name") or "" for x in c.forums + c.forum_topics), "forum names")
+        review("6.07", "Instructor replies in discussions could not be counted; check the forums.")
+    review("6.07", "Check that your discussion replies are probing and content-based, not just 'good job'.")
     review("6.08", "Other instructional activities are a committee judgment.")
     put("6.09", "1" if c.news else "X", f"auto: {len(c.news)} announcements")
     put("6.10", "1" if c.forums else "X", f"auto: {len(c.forums)} forums")

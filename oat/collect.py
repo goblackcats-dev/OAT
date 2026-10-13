@@ -329,6 +329,18 @@ def collect(d2l, org):
             r = d2l.get(d2l.le(f"/{org}/discussions/forums/{f['ForumId']}/topics/{t['TopicId']}/rubrics"),
                         f"rubrics:{t['TopicId']}")
             t["_rubric_count"] = len(r) if isinstance(r, list) else None
+    # Instructor activity in discussions: COUNTS ONLY. No post text, no student ids and no names are kept.
+    me = (d2l.get("/d2l/api/lp/1.0/users/whoami", "whoami") or {}).get("Identifier")
+    for f in forums:
+        for t in f.get("Topics") or []:
+            posts = d2l.get_paged(d2l.le(f"/{org}/discussions/forums/{f['ForumId']}/topics/{t['TopicId']}/posts/"),
+                                  f"posts:{t['TopicId']}")
+            mine = [p for p in posts if str(p.get("PostingUserId")) == str(me)]
+            t["_activity"] = {
+                "posts": len(posts), "instructor_posts": len(mine),
+                "instructor_replies": sum(1 for p in mine if p.get("ParentPostId")),
+                "students_posting": len({p.get("PostingUserId") for p in posts if str(p.get("PostingUserId")) != str(me)}),
+                "instructor_dates": sorted({str(p.get("DatePosted", ""))[:10] for p in mine if p.get("DatePosted")})}
     data["forums"] = forums
     data["grade_items"] = d2l.get(d2l.le(f"/{org}/grades/"), "grade_items")
     data["grade_setup"] = d2l.get(d2l.le(f"/{org}/grades/setup/"), "grade_setup")
@@ -651,7 +663,7 @@ def follow_simple_syllabus(page, base, org, shot_path, login):
     return out
 
 
-def syllabus_and_qwickly(page, base, org, shots_dir, login=None):
+def syllabus_and_qwickly(page, base, org, shots_dir, login=None, follow_direct=True):
     print("Scanning the course menus...")
     nav = nav_scan(page, base, org)
     res = {"nav": nav, "syllabus_tool": {"found": False}, "qwickly": {"found": False}}
@@ -661,8 +673,8 @@ def syllabus_and_qwickly(page, base, org, shots_dir, login=None):
         res["syllabus_tool"] = open_and_capture(page, syl, shots_dir / "syllabus.png", base)
     if not any(f.get("external") for f in res["syllabus_tool"].get("frames", [])):
         res["syllabus_tool"] = capture_by_click(page, base, org, r"^syllabus$", shots_dir / "syllabus.png")
-    if any(re.search(r"could not locate a matching account|error has occurred", f.get("text", ""), re.I)
-           for f in res["syllabus_tool"].get("frames", []) if f.get("external")):
+    if follow_direct and any(re.search(r"could not locate a matching account|error has occurred", f.get("text", ""), re.I)
+                             for f in res["syllabus_tool"].get("frames", []) if f.get("external")):
         print("The Syllabus tool shows an account error; clicking its direct-login button...")
         res["syllabus_direct"] = follow_simple_syllabus(page, base, org, shots_dir / "syllabus_direct.png", login)
     qw = find_link(nav, r"qwickly") or find_link(nav, r"attendance")
@@ -682,8 +694,97 @@ def syllabus_and_qwickly(page, base, org, shots_dir, login=None):
     return res
 
 
+def term_name(code):
+    """'ADN_207_H1_FL2025' -> 'Fall 2025' (best effort)."""
+    m = re.search(r"(FL|FA|SP|SU|WI|SM)(20\d{2})", code or "", re.I)
+    if not m:
+        return ""
+    return {"FL": "Fall", "FA": "Fall", "SP": "Spring", "SU": "Summer", "SM": "Summer", "WI": "Winter"}[m.group(1).upper()] + " " + m.group(2)
+
+
+def mode_guess(code):
+    """Guess online / hybrid / HyFlex from the section token (V=online, H=hybrid, HF=HyFlex). Only a suggestion."""
+    for tok in re.split(r"[_\-\s]", code or ""):
+        if re.fullmatch(r"(HF|HYF)\d*", tok, re.I):
+            return "HyFlex"
+        if re.fullmatch(r"H\d+", tok, re.I):
+            return "Hybrid"
+        if re.fullmatch(r"(V|O|W|OL)\d+", tok, re.I):
+            return "Online"
+    return ""
+
+
+def list_my_courses(d2l):
+    """Courses where I am staff (not a student), newest first. Names/ids/dates only."""
+    out, url = [], d2l.lp("/enrollments/myenrollments/?orgUnitTypeId=3")
+    for _ in range(10):
+        body = d2l.get(url, "myenrollments")
+        if not isinstance(body, dict):
+            break
+        for it in body.get("Items") or []:
+            ou, ac = it.get("OrgUnit") or {}, it.get("Access") or {}
+            role = ac.get("ClasslistRoleName") or ""
+            if re.search(r"instructor|professor|faculty|teacher|lead", role, re.I) and not re.search(r"student", role, re.I):
+                end = str(ac.get("EndDate") or "")[:10]
+                out.append({"id": str(ou.get("Id")), "code": ou.get("Code") or "", "name": ou.get("Name") or "",
+                            "role": role, "active": bool(ac.get("IsActive")), "end": end,
+                            "term": term_name(ou.get("Code") or ou.get("Name") or ""),
+                            "mode": mode_guess(ou.get("Code") or ou.get("Name") or "")})
+        pi = body.get("PagingInfo") or {}
+        if pi.get("HasMoreItems") and pi.get("Bookmark"):
+            url = d2l.lp("/enrollments/myenrollments/?orgUnitTypeId=3&bookmark=" + str(pi["Bookmark"]))
+        else:
+            break
+    return sorted(out, key=lambda x: x["end"], reverse=True)
+
+
+def collect_one(d2l, page, base, org, outdir, how, login=None, shots=True, full=True):
+    """Collect one course. `full=False` skips the slow extras (screenshots, direct Simple Syllabus login)."""
+    import traceback
+    (outdir / "screenshots").mkdir(parents=True, exist_ok=True)
+    try:
+        page.goto(f"{base}/d2l/home/{org}", wait_until="domcontentloaded", timeout=30000)
+        settle(page)
+    except Exception:
+        pass
+    d2l.errors = {}
+    print(f"Reading course {org} (modules, quizzes, discussions, grades, files)...")
+    try:
+        data = collect(d2l, org)
+    except Exception:
+        data = {"orgUnitId": org, "fatal": traceback.format_exc(), "api_errors": dict(d2l.errors)}
+        print("Collection hit an error (partial data will still be saved):\n" + data["fatal"])
+    data["login_method"] = how
+    data["whoami"] = logged_in(d2l)
+    try:
+        extra = syllabus_and_qwickly(page, base, org, outdir / "screenshots", login, follow_direct=full)
+        data["nav"], data["syllabus_tool"], data["qwickly"] = extra["nav"], extra["syllabus_tool"], extra["qwickly"]
+        if extra.get("syllabus_direct"):
+            data["syllabus_direct"] = extra["syllabus_direct"]
+    except Exception as e:
+        data["qwickly"] = {"found": False, "error": str(e)}
+    if shots and full:
+        print("Taking screenshots...")
+        for label, path in SHOTS:
+            try:
+                page.goto(base + path.format(org=org), wait_until="domcontentloaded", timeout=30000)
+                settle(page)
+                page.screenshot(path=str(outdir / "screenshots" / f"{label}.png"), full_page=True)
+            except Exception as e:  # screenshots are best-effort
+                data.setdefault("screenshot_errors", {})[label] = str(e)
+    path = outdir / "course.json"
+    path.write_text(json.dumps(data, indent=2, default=str))
+    print(f"Wrote {path}")
+    if data["api_errors"]:
+        print("Some API calls failed (see api_errors in course.json):", ", ".join(data["api_errors"]))
+    return path, data
+
+
 def run_collect(course, base_hint=None, out="out", profile="session", headless=False,
-                browser_path=None, shots=True, login=None, channel=None, no_wait=False):
+                browser_path=None, shots=True, login=None, channel=None, no_wait=False,
+                extra_orgs=(), pick=None):
+    """Log in once, collect the main course in full, then (lighter) each extra course.
+    `pick(courses) -> {"include": [ids], "meets": {id: n}}` lets the caller choose which courses to include."""
     m = re.match(r"(https?://[^/]+)/d2l/home/(\d+)", course)
     if m:
         base, org = m.group(1), m.group(2)
@@ -691,8 +792,7 @@ def run_collect(course, base_hint=None, out="out", profile="session", headless=F
         base, org = base_hint, course
     else:
         sys.exit("Give a full course URL like https://learn.jalc.edu/d2l/home/99316")
-    outdir = Path(out) / org
-    (outdir / "screenshots").mkdir(parents=True, exist_ok=True)
+    extras, my_courses, choice = [], [], {}
     with sync_playwright() as p:
         kw = dict(headless=headless, viewport={"width": 1280, "height": 900})
         if browser_path:
@@ -709,45 +809,31 @@ def run_collect(course, base_hint=None, out="out", profile="session", headless=F
             print("Logged in as:", (who or {}).get("FirstName"), (who or {}).get("LastName"))
             try:  # let any post-login redirects finish before reading data
                 settle(page)
-                page.goto(f"{base}/d2l/home/{org}", wait_until="domcontentloaded", timeout=30000)
-                settle(page)
             except Exception:
                 pass
-        import traceback
-        print("Reading the course (modules, quizzes, discussions, grades, files)...")
-        try:
-            data = collect(d2l, org)
-        except Exception:
-            data = {"orgUnitId": org, "fatal": traceback.format_exc(), "api_errors": dict(d2l.errors)}
-            print("Collection hit an error (partial data will still be saved):\n" + data["fatal"])
-        data["login_method"] = how
-        data["whoami"] = logged_in(d2l)
-        try:
-            extra = syllabus_and_qwickly(page, base, org, outdir / "screenshots", login)
-            data["nav"], data["syllabus_tool"], data["qwickly"] = extra["nav"], extra["syllabus_tool"], extra["qwickly"]
-            if extra.get("syllabus_direct"):
-                data["syllabus_direct"] = extra["syllabus_direct"]
-        except Exception as e:
-            data["qwickly"] = {"found": False, "error": str(e)}
-        if shots:
-            print("Taking screenshots...")
-            for label, path in SHOTS:
-                try:
-                    page.goto(base + path.format(org=org), wait_until="domcontentloaded", timeout=30000)
-                    settle(page)
-                    page.screenshot(path=str(outdir / "screenshots" / f"{label}.png"), full_page=True)
-                except Exception as e:  # screenshots are best-effort
-                    data.setdefault("screenshot_errors", {})[label] = str(e)
+        if pick is not None or extra_orgs:
+            try:
+                my_courses = list_my_courses(d2l)
+            except Exception as e:
+                print("Could not list your courses:", e)
+            if pick is not None and my_courses:
+                choice = pick(my_courses) or {}
+                extra_orgs = [i for i in choice.get("include", []) if i != org]
+        path, data = collect_one(d2l, page, base, org, Path(out) / org, how, login, shots, full=True)
+        for xo in extra_orgs:
+            try:
+                xp, xd = collect_one(d2l, page, base, xo, Path(out) / xo, how, login, shots=False, full=False)
+                extras.append((xo, xd))
+            except Exception as e:
+                print(f"Skipping course {xo}: {e}")
         try:
             ctx.close()
         except Exception:
             pass
-    path = outdir / "course.json"
-    path.write_text(json.dumps(data, indent=2, default=str))
-    print(f"Wrote {path}")
-    if data["api_errors"]:
-        print("Some API calls failed (see api_errors in course.json):", ", ".join(data["api_errors"]))
-    return path, data, how
+    data["_my_courses"] = my_courses
+    data["_course_choice"] = choice
+    path.write_text(json.dumps(data, indent=2, default=str))   # keep the course list with the saved data
+    return path, data, how, extras
 
 
 def main():

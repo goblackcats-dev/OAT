@@ -33,7 +33,17 @@ def _domains(d):
     return sorted(x for x in out if "jalc.edu" not in x)
 
 
-def collect(d, result):
+def collect(d, result, others=()):
+    ev = _collect_one(d, result)
+    for od in others:
+        name = (od.get("course") or {}).get("Code") or od.get("orgUnitId")
+        sub = _collect_one(od, result)
+        for key in ev:
+            ev[key] += [f"[{name}] {x}" for x in sub[key][:5] if not x.startswith(("Nothing", "Tool's findings", "Ask each vendor"))]
+    return ev
+
+
+def _collect_one(d, result):
     c = Ctx(d)
     ev = {}
 

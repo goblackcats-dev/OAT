@@ -25,6 +25,52 @@ def resource(name):
     return base / name
 
 
+def update_config(**kv):
+    cfg = load_config()
+    cfg.update(kv)
+    CONFIG.write_text(json.dumps(cfg))
+
+
+def make_picker(a, base, primary_org):
+    """Choose which of my other courses count toward 'all my online/hybrid/HyFlex courses' (remembered)."""
+    from datetime import date, timedelta
+
+    def pick(courses):
+        cfg = load_config()
+        saved = (cfg.get("courses") or {}).get(base)
+        if getattr(a, "courses", None):
+            choice = {"include": [x.strip() for x in a.courses.split(",") if x.strip()], "meets": (saved or {}).get("meets", {})}
+        elif saved and not getattr(a, "pick_courses", False):
+            return saved
+        elif not sys.stdin.isatty():
+            return saved or {"include": [], "meets": {}}
+        else:
+            cutoff = (date.today() - timedelta(days=400)).isoformat()
+            print("\nCourses where you are an instructor (newest first):")
+            sug = []
+            for i, cx in enumerate(courses, 1):
+                mark = "  <- the course being assessed" if cx["id"] == primary_org else ""
+                print(f"  [{i}] {cx['code']:<24} {cx['term']:<12} {cx['mode'] or '?':<7} "
+                      f"{'active' if cx['active'] else 'ended ' + cx['end']}{mark}")
+                if cx["id"] != primary_org and cx["mode"] and (cx["active"] or cx["end"] >= cutoff):
+                    sug.append(i)
+            print("The rubric applies to ALL your online, hybrid and HyFlex courses, so pick the others to include.")
+            raw = input(f"Numbers to include (e.g. 2,3), Enter = suggested {sug}, 0 = none: ").strip()
+            nums = sug if raw == "" else [] if raw == "0" else [int(x) for x in re.findall(r"\d+", raw)]
+            include = [courses[n - 1]["id"] for n in nums if 0 < n <= len(courses) and courses[n - 1]["id"] != primary_org]
+            meets = dict((saved or {}).get("meets", {}))
+            for cid in include + [primary_org]:
+                cx = next((c for c in courses if c["id"] == cid), None)
+                if cx:
+                    v = input(f"In-person meetings for {cx['code']} (Enter to skip): ").strip()
+                    if v:
+                        meets[cid] = v
+            choice = {"include": include, "meets": meets}
+        update_config(courses={**(cfg.get("courses") or {}), base: choice})
+        return choice
+    return pick
+
+
 def load_config():
     try:
         return json.loads(CONFIG.read_text())
@@ -64,12 +110,34 @@ def attach_syllabus(data, path):
     print(f"Using syllabus file: {p.name} ({len(text):,} characters)")
 
 
-def finish(a, data):
+def finish(a, data, extras=()):
     if getattr(a, "syllabus", None):
         attach_syllabus(data, a.syllabus)
-    result = analyze.analyze(data)
+    primary = analyze.analyze(data)
     org = data["orgUnitId"]
-    ev = evidence.collect(data, result)
+    label = lambda d: ((d.get("course") or {}).get("Code") or d.get("orgUnitId"))
+    others = [(label(xd), analyze.analyze(xd)) for _, xd in extras]
+    if others:
+        from . import combine
+        result = combine.combine([(label(data), primary)] + others)
+        print(f"Combined {1 + len(others)} courses: 1 = in all, 0 = in some, X = in none.")
+    else:
+        result = primary
+    # page-1 table: my other online/hybrid/HyFlex courses
+    from datetime import date
+    choice = data.get("_course_choice") or {}
+    mine = {c["id"]: c for c in data.get("_my_courses") or []}
+    rows = []
+    for cid in choice.get("include", []):
+        cx = mine.get(cid)
+        if cx and cid != org:
+            rows.append({"id": cx["code"], "title": cx["name"] if cx["name"] != cx["code"] else (cx["term"] + " " + cx["mode"]).strip(),
+                         "meets": choice.get("meets", {}).get(cid, ""), "active": bool(cx["active"] and cx["end"] >= date.today().isoformat()),
+                         "last_semester": cx["term"], "notes": cx["mode"]})
+    if choice.get("meets", {}).get(org):
+        result["header"]["in_person_meets"] = choice["meets"][org]
+    result["additional_courses"] = rows[:6]
+    ev = evidence.collect(data, result, others=[xd for _, xd in extras])
 
     # --- the three instructor-only confirmations: evidence first, then YOUR answer ---
     answers_in = {}
@@ -168,6 +236,8 @@ def main():
     ap.add_argument("--out", default="OAT_output")
     ap.add_argument("--headless", action="store_true")
     ap.add_argument("--browser-path")
+    ap.add_argument("--courses", metavar="IDS", help="comma-separated D2L ids of your OTHER online/hybrid/HyFlex courses")
+    ap.add_argument("--pick-courses", action="store_true", help="choose your other courses again")
     ap.add_argument("--schedule", metavar="XLSX", help="the OAT Assessment Schedule spreadsheet (fills page 1; remembered)")
     ap.add_argument("--answers", metavar="FILE", help='JSON with your own answers, e.g. {"copyright":"yes","feedback":"no","accessibility":"skip"}')
     ap.add_argument("--skip-questions", action="store_true", help="do not ask the three confirmations (they stay unanswered)")
@@ -182,7 +252,13 @@ def main():
         f = Path(a.out) / "data" / a.reanalyze / "course.json"
         if not f.exists():
             sys.exit(f"No saved data at {f}. Run the full collection first.")
-        finish(a, json.loads(f.read_text()))
+        data = json.loads(f.read_text())
+        extras = []
+        for xo in (data.get("_course_choice") or {}).get("include", []):
+            xf = Path(a.out) / "data" / xo / "course.json"
+            if xo != a.reanalyze and xf.exists():
+                extras.append((xo, json.loads(xf.read_text())))
+        finish(a, data, extras)
         return
 
     if a.refill:
@@ -222,9 +298,9 @@ def main():
     path = data = None
     for channel in ([None] if a.browser_path else ["msedge", "chrome", None]):
         try:
-            path, data, how = run_collect(course, out=a.out + "/data", profile=str(Path.home() / ".oat_session"),
-                                          headless=a.headless, browser_path=a.browser_path, login=login,
-                                          channel=channel)
+            path, data, how, extras = run_collect(course, out=a.out + "/data", profile=str(Path.home() / ".oat_session"),
+                                                  headless=a.headless, browser_path=a.browser_path, login=login,
+                                                  channel=channel, pick=make_picker(a, base, m.group(2)))
             break
         except Exception as e:
             if "Executable doesn't exist" in str(e) or "not found" in str(e).lower() or "channel" in str(e).lower():
@@ -237,7 +313,7 @@ def main():
         if ask_yn("The saved login didn't work. Update it now?", True):
             login = creds.prompt(base, login)
 
-    finish(a, data)
+    finish(a, data, extras)
 
 
 if __name__ == "__main__":
