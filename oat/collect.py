@@ -358,7 +358,8 @@ def wait_external(page, base, timeout=40):
 
 MENU_JS = """els => els.map(e => ({
   text: (e.getAttribute('text') || e.getAttribute('aria-label') || e.innerText || e.textContent || '').trim().slice(0, 80),
-  href: e.getAttribute('href') || e.href || ''}))"""
+  href: (() => { const h = e.getAttribute('href') || e.href || '';
+                 try { return h ? new URL(h, document.baseURI).href : ''; } catch (x) { return h; } })()}))"""
 # Brightspace dropdown items are web components (d2l-menu-item-link), not <a> tags.
 MENU_SEL = "d2l-menu-item-link, d2l-menu-item, d2l-link, [role='menuitem'], [role='link']"
 
@@ -417,6 +418,8 @@ def find_link(nav, pattern):
 
 
 def open_and_capture(page, link, shot_path, base):
+    from urllib.parse import urljoin
+    link = dict(link, href=urljoin(base + "/", link["href"]))
     out = {"found": True, "link_text": link["text"], "link_href": link["href"]}
     try:
         page.goto(link["href"], wait_until="domcontentloaded", timeout=40000)
