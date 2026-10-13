@@ -16,7 +16,12 @@ SEARCH = lambda pat, text: re.search(pat, text or "", re.I)
 
 
 def _t(x):
-    return (x or {}).get("Text") if isinstance(x, dict) else (x or "")
+    """D2L 'rich text' can be a string, {'Text','Html'}, or nested {'Text': {'Text','Html'}}. Always return str."""
+    if isinstance(x, str):
+        return x
+    if isinstance(x, dict):
+        return _t(x.get("Text") or x.get("Html") or "")
+    return ""
 
 
 class Ctx:

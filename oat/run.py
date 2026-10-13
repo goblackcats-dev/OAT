@@ -56,10 +56,35 @@ def open_file(p):
         pass
 
 
+def finish(a, data):
+    result = analyze.analyze(data)
+    org = data["orgUnitId"]
+    print("\nVerbal confirmations (only you can give these; answer honestly, or 'skip' to leave blank):")
+    for iid, q in CONFIRMATIONS:
+        ans = True if a.yes_confirm else ask_yn(q)
+        if ans is True:
+            result["items"][iid] = {"score": "1", "note": "instructor verbally confirmed"}
+            result["review"] = [r for r in result["review"] if r["id"] != iid]
+        elif ans is False:
+            result["items"][iid] = {"score": "X", "note": "instructor did not confirm"}
+            result["review"] = [r for r in result["review"] if r["id"] != iid]
+
+    outdir = Path(a.out) / org
+    outdir.mkdir(parents=True, exist_ok=True)
+    (outdir / "scores.json").write_text(json.dumps(result, indent=2))
+    analyze.write_review(result, analyze.copyright_report(data), outdir / "review.md")
+    pdf = outdir / f"OAT_Rubric_{org}.pdf"
+    pdf_fill.build(result, str(resource("rubric.pdf")), str(pdf))
+    print(f"\nDone.\n  Filled rubric : {pdf}\n  Review report : {outdir / 'review.md'}\n  Scores (editable): {outdir / 'scores.json'}")
+    print("To change a score, edit scores.json and run:  OAT.exe --refill", org)
+    open_file(pdf)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("course", nargs="?")
     ap.add_argument("--refill", metavar="COURSE_ID", help="rebuild the PDF from an edited scores.json")
+    ap.add_argument("--reanalyze", metavar="COURSE_ID", help="re-score saved data (no login needed)")
     ap.add_argument("--set-login", action="store_true")
     ap.add_argument("--forget-login", action="store_true")
     ap.add_argument("--out", default="OAT_output")
@@ -67,6 +92,13 @@ def main():
     ap.add_argument("--browser-path")
     ap.add_argument("--yes-confirm", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args()
+
+    if a.reanalyze:
+        f = Path(a.out) / "data" / a.reanalyze / "course.json"
+        if not f.exists():
+            sys.exit(f"No saved data at {f}. Run the full collection first.")
+        finish(a, json.loads(f.read_text()))
+        return
 
     if a.refill:
         d = Path(a.out) / a.refill
@@ -117,27 +149,7 @@ def main():
         if ask_yn("The saved login didn't work. Update it now?", True):
             login = creds.prompt(base, login)
 
-    result = analyze.analyze(data)
-    org = data["orgUnitId"]
-    print("\nVerbal confirmations (only you can give these; answer honestly, or 'skip' to leave blank):")
-    for iid, q in CONFIRMATIONS:
-        ans = True if a.yes_confirm else ask_yn(q)
-        if ans is True:
-            result["items"][iid] = {"score": "1", "note": "instructor verbally confirmed"}
-            result["review"] = [r for r in result["review"] if r["id"] != iid]
-        elif ans is False:
-            result["items"][iid] = {"score": "X", "note": "instructor did not confirm"}
-            result["review"] = [r for r in result["review"] if r["id"] != iid]
-
-    outdir = Path(a.out) / org
-    outdir.mkdir(parents=True, exist_ok=True)
-    (outdir / "scores.json").write_text(json.dumps(result, indent=2))
-    analyze.write_review(result, analyze.copyright_report(data), outdir / "review.md")
-    pdf = outdir / f"OAT_Rubric_{org}.pdf"
-    pdf_fill.build(result, str(resource("rubric.pdf")), str(pdf))
-    print(f"\nDone.\n  Filled rubric : {pdf}\n  Review report : {outdir / 'review.md'}\n  Scores (editable): {outdir / 'scores.json'}")
-    print("To change a score, edit scores.json and run:  OAT.exe --refill", org)
-    open_file(pdf)
+    finish(a, data)
 
 
 if __name__ == "__main__":

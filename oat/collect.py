@@ -179,6 +179,15 @@ def ensure_login(d2l, login=None, minutes=10):
     sys.exit("Timed out waiting for login.")
 
 
+def rich(x):
+    """D2L rich text -> plain string (handles nested {'Text': {'Text','Html'}})."""
+    if isinstance(x, str):
+        return x
+    if isinstance(x, dict):
+        return rich(x.get("Text") or x.get("Html") or "")
+    return ""
+
+
 def flatten_toc(modules, trail=()):
     """Yield (module path, topic) for every topic in the table of contents."""
     for m in modules:
@@ -230,7 +239,7 @@ def collect(d2l, org):
                            "hidden": topic.get("IsHidden"), "due": topic.get("DueDate"),
                            "start": topic.get("StartDate"), "end": topic.get("EndDate"),
                            "activity": topic.get("ActivityType"),
-                           "description": (topic.get("Description") or {}).get("Text")})
+                           "description": rich(topic.get("Description"))})
     data["topics"] = topics
     try:
         data["pages"] = fetch_pages(d2l, topics)
@@ -241,7 +250,7 @@ def collect(d2l, org):
     # Module descriptions/overviews live on the module objects themselves.
     data["modules"] = [{"path": list(t), "id": m.get("ModuleId"), "title": m.get("Title"),
                         "hidden": m.get("IsHidden"),
-                        "description": (m.get("Description") or {}).get("Text"),
+                        "description": rich(m.get("Description")),
                         "n_topics": len(m.get("Topics") or [])}
                        for t, m, topic in flatten_toc((toc or {}).get("Modules") or []) if topic is None]
 
