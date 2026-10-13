@@ -8,8 +8,9 @@ def _score(items, iid):
     return str((items.get(iid) or {}).get("score", "")).upper()
 
 
-def percent_band(items, prefix, n):
-    ids = [f"{prefix}.{i:02d}" for i in range(1, n + 1)]
+def percent_band(items, prefix, n, skip=()):
+    ids = [f"{prefix}.{i:02d}" for i in range(1, n + 1) if f"{prefix}.{i:02d}" not in skip]
+    n = len(ids)
     scores = [_score(items, i) for i in ids]
     na = sum(s == "NA" for s in scores)
     applicable = n - na
@@ -47,6 +48,6 @@ def band_for(section, items):
     if section == 4:
         return percent_band(items, "4", 10)
     if section == 5:
-        return percent_band(items, "5", 11)
+        return percent_band(items, "5", 11, skip=("5.04",))
     if section == 6:
         return rsi_band(items)

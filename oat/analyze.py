@@ -37,18 +37,24 @@ class Ctx:
         self.forum_topics = [t for f in self.forums for t in (f.get("Topics") or [])]
         self.grades = d.get("grade_items") or []
         self.top_modules = [m for m in self.modules if len(m["path"]) == 1]
-        self.syllabus = " ".join(p["text"] for p in self.pages if SEARCH("syllabus", p["title"] + p["url"]))
+        self.syl_tool = " ".join(f.get("text", "") for f in (d.get("syllabus_tool") or {}).get("frames", []))
+        self.syllabus = (" ".join(p["text"] for p in self.pages if SEARCH("syllabus", p["title"] + p["url"]))
+                         + " " + self.syl_tool).strip()
+        self.grade_names = [g.get("Name") or "" for g in self.grades if isinstance(g, dict)]
+        self.videos = [t for t in self.topics if ":video:" in (t.get("url") or "")
+                       or (t.get("title") or "").lower().endswith((".mp4", ".mov", ".mp3"))]
         mod_text = " ".join((m.get("title") or "") + " " + re.sub("<[^>]+>", " ", m.get("description") or "")
                             for m in self.modules)
         topic_text = " ".join((t.get("title") or "") + " " + re.sub("<[^>]+>", " ", t.get("description") or "")
                               for t in self.topics)
         news_text = " ".join((n.get("Title") or "") + " " + re.sub("<[^>]+>", " ", _t(n.get("Body")) or "")
                              for n in self.news)
-        self.page_text = " ".join(p["text"] for p in self.pages)
+        self.page_text = " ".join(p["text"] for p in self.pages) + " " + self.syl_tool
         self.corpus = " ".join([self.page_text, mod_text, topic_text, news_text])
         self.titles = [x.get("Name") or x.get("Title") or "" for x in
                        (self.quizzes + self.dropbox + self.forums + self.forum_topics)] + \
-                      [t.get("title") or "" for t in self.topics] + [m.get("title") or "" for m in self.modules]
+                      [t.get("title") or "" for t in self.topics] + [m.get("title") or "" for m in self.modules] \
+            + self.grade_names
 
     def names_matching(self, pat, pool=None):
         pool = pool if pool is not None else self.titles
@@ -80,14 +86,18 @@ def analyze(d):
     # ---------- Section 1 ----------
     syl_pages = [p for p in c.pages if SEARCH("syllabus", p["title"] + p["url"])]
     syl_topics = [t for t in c.topics if SEARCH("syllabus", t.get("title") or "")]
-    if syl_pages or syl_topics:
-        put("1.01", "1", "auto: syllabus found: " + (syl_pages or syl_topics)[0].get("title", ""))
+    nav_syl = any(re.fullmatch(r"syllabus", (l.get("text") or "").strip(), re.I)
+                  for l in (d.get("nav") or {}).get("links", [])) \
+        or "Syllabus" in (d.get("qwickly") or {}).get("nav_links", []) \
+        or (d.get("syllabus_tool") or {}).get("found")
+    if syl_pages or syl_topics or nav_syl:
+        put("1.01", "1", "auto: syllabus found" + (" (Syllabus tool in the course navbar)" if nav_syl else ": " + (syl_pages or syl_topics)[0].get("title", "")))
     else:
-        put("1.01", "X", "auto: no topic titled syllabus")
+        put("1.01", "X", "auto: no syllabus topic or Syllabus tool found")
     st = c.syllabus or c.corpus
     lbl = "syllabus" if c.syllabus else "course text"
     if not c.syllabus:
-        review("1.02-1.05", "Syllabus text could not be read (file type not supported or not found); these were checked against other course text only.")
+        review("1.02-1.05", "The Syllabus tool's text could not be read, so these were checked against other course text only. Check the Syllabus tab by hand.")
     kw("1.02", r"(learning )?(objectives?|outcomes?)", st, lbl)
     kw("1.03", r"required (materials|text|resources)|materials|textbook|supplies", st, lbl)
     kw("1.04", r"\bISBN\b|\bedition\b", st, lbl)
@@ -112,11 +122,11 @@ def analyze(d):
     else:
         put("1.16", "X", "auto: no instructor name found")
     kw("1.17", r"[\w.+-]+@[\w-]+\.[\w.]+|e-?mail")
-    kw("1.18", r"\(?\d{3}\)?[-. ]\d{3}[-. ]\d{4}|ext\.? ?\d+")
+    kw("1.18", r"\(?\d{3}\)?[-. ]\d{3}[-. ]\d{4}|\bext(ension)?\.? ?\d{2,5}\b")
     kw("1.19", r"respon\w+ (time|within)|within \d+ (hours|business|days)|(24|48|72) hours")
     kw("1.20", r"office (location|:)|\broom\b|\bbuilding\b|\bhall\b")
     kw("1.21", r"office hours")
-    kw("1.22", r"\b(Ph\.?D|Ed\.?D|M\.?S\.?N?|M\.?A\.?|M\.?B\.?A|B\.?S\.?N?|D\.?N\.?P|M\.?D)\b|master'?s|bachelor|doctor(ate)?")
+    kw("1.22", r"(?-i:\b(Ph\.?D|Ed\.?D|MSN|MS|MA|MBA|BSN|BS|DNP|MD|APRN|RN)\b)|master'?s|bachelor|doctor(ate)?|degree")
     review("1.23", "Verbal confirmation: the instructor must state copyright clearance (see review report).")
 
     # ---------- Section 2 ----------
@@ -158,20 +168,21 @@ def analyze(d):
     if items:
         have = sum(1 for _, ins in items if len(re.sub("<[^>]+>", "", ins or "")) > 25)
         put("3.06", grade_fraction(have / len(items), 0.9), f"auto: instructions present on {have}/{len(items)} assessments")
-    due = [x for x in c.dropbox + c.quizzes if x.get("DueDate")]
-    if c.dropbox or c.quizzes:
-        n = len(c.dropbox) + len(c.quizzes)
-        put("3.07", grade_fraction(len(due) / n, 0.9), f"auto: due dates on {len(due)}/{n} dropboxes+quizzes")
+    dueable = c.dropbox + c.quizzes + c.forum_topics
+    due = [x for x in dueable if x.get("DueDate")]
+    if dueable:
+        put("3.07", grade_fraction(len(due) / len(dueable), 0.9),
+            f"auto: due dates on {len(due)}/{len(dueable)} dropboxes, quizzes and discussion topics")
     review("3.08", "Navigation being intuitive/consistent is a judgment call (see screenshots).")
 
     # ---------- Section 4 / 5 (variety) ----------
     work = c.dropbox + c.quizzes + c.forum_topics
-    wnames = [(x.get("Name") or "") + " " + re.sub("<[^>]+>", " ", _t(x.get("CustomInstructions")) or _t(x.get("Description")) or "")
-              for x in work] + [t["title"] or "" for t in c.topics]
+    wnames = [((x.get("Name") or ""), (x.get("Name") or "") + " " + re.sub("<[^>]+>", " ", _t(x.get("CustomInstructions")) or _t(x.get("Instructions")) or _t(x.get("Description")) or ""))
+              for x in work] + [(t["title"] or "", t["title"] or "") for t in c.topics] + [(g, g) for g in c.grade_names]
 
     def variety(iid, pat, pool=None, always=None):
         pool = wnames if pool is None else pool
-        hits = sorted({w.strip()[:40] for w in pool if SEARCH(pat, w)})[:3]
+        hits = sorted({name.strip()[:45] for name, full in pool if SEARCH(pat, full) and name.strip()})[:3]
         if always or hits:
             put(iid, "1", "auto: " + (always or "e.g. " + "; ".join(hits)))
         else:
@@ -187,9 +198,8 @@ def analyze(d):
     review("4.09", "Open 'other activity' slots are left to the committee.")
     variety("5.01", r"$^", always=f"{len(c.quizzes)} quizzes" if c.quizzes else None)
     variety("5.02", r"$^", always=f"{len(c.forum_topics)} discussion topics" if c.forum_topics else None)
-    variety("5.03", r"practice|self.?(check|assess)|study guide|review|ungraded|survey", [(q.get("Name") or "") for q in c.quizzes + c.dropbox])
-    variety("5.04", r"reflect|journal|self.?assess")
-    variety("5.05", r"peer|review|critique")
+    variety("5.03", r"practice|self.?(check|assess)|study guide|review guide|adaptive|pre-?lab|ungraded|survey|reflect|journal")
+    variety("5.05", r"peer review|literature review|article review|website review|critique|peer")
     variety("5.06", r"case")
     variety("5.07", r"project")
     variety("5.08", r"paper|essay|research|report")
@@ -204,9 +214,18 @@ def analyze(d):
         except ValueError:
             pass
     if len(dates) >= 2:
-        weeks = {x.isocalendar()[:2] for x in dates}
-        span = (max(dates) - min(dates)).days // 7 + 1
-        frac = len(weeks) / max(1, span)
+        def monday(x):
+            return (x - dt.timedelta(days=x.weekday())).date()
+        start, end = min(dates), max(dates)
+        cs, ce = (d.get("course") or {}).get("StartDate"), (d.get("course") or {}).get("EndDate")
+        try:  # use the course's own start/end when available
+            start = min(start, dt.datetime.fromisoformat(cs.replace("Z", "+00:00")))
+            end = max(end, dt.datetime.fromisoformat(ce.replace("Z", "+00:00")))
+        except Exception:
+            pass
+        weeks = {monday(x) for x in dates}
+        span = (monday(end) - monday(start)).days // 7 + 1
+        frac = min(1.0, len(weeks) / max(1, span))
         put("6.01", grade_fraction(frac, 0.8, 0.3), f"auto: announcements in {len(weeks)} of {span} weeks (cannot judge whether they are substantive)")
         review("6.01", "Check that announcements are content-related, not just logistics/reminders.")
     elif c.news:
@@ -234,57 +253,85 @@ def analyze(d):
     review("6.16", "Other communication is optional.")
 
     # ---------- Section 7 ----------
-    kw("7.01", r"check.?in|introduc|getting to know|icebreaker", " ".join(c.titles))
-    kw("7.02", r"mid.?(term|course|semester).*(feedback|survey|evaluation)|(feedback|survey).*mid", " ".join(c.titles) + " " + c.corpus)
-    kw("7.03", r"end.of.(course|semester)|wrap.?up|course evaluation|final (feedback|survey)|closing", " ".join(c.titles))
-    kw("7.04", r"feedback|survey|evaluation", " ".join(c.titles))
+    fb = " ; ".join(t for t in c.titles if not t.lower().endswith((".mp4", ".mp3")))
+    kw("7.01", r"check.?in|getting to know|icebreaker|introduce yourself|how.s the course|welcome survey|start.of.course survey", fb)
+    kw("7.02", r"mid.?(term|course|semester)\W*(feedback|survey|evaluation|check)|(feedback|survey|evaluation)\W*mid", fb)
+    kw("7.03", r"end.of.(course|semester)|wrap.?up|course evaluation|final (feedback|survey)|closing (survey|message)", fb)
+    kw("7.04", r"course (feedback|evaluation)|student (feedback|evaluation)|feedback survey|\bsurvey\b|suggestion box", fb)
     review("7.05", "Verbal confirmation: instructor reviews learner feedback and adjusts the course.")
 
     # ---------- Section 8 (accessibility, measurable parts) ----------
-    stats = [p["stats"] for p in c.pages if p.get("kind") == "html"]
-    imgs = sum(s.get("images", 0) for s in stats)
-    noalt = sum(s.get("images_missing_alt", 0) for s in stats)
-    gen = sum(s.get("generic_link_text", 0) for s in stats)
-    red = sum(s.get("red_text", 0) for s in stats)
-    blink = sum(s.get("blink", 0) for s in stats)
+    html = [p["stats"] for p in c.pages if p.get("kind") == "html"]
+    gen = sum(s.get("generic_link_text", 0) for s in html)
+    red = sum(s.get("red_text", 0) for s in html)
+    blink = sum(s.get("blink", 0) for s in html)
+    office = [p for p in c.pages if p.get("kind") in ("docx", "pptx")]
+    o_imgs = sum(p["stats"].get("images", 0) for p in office)
+    o_alt = sum(p["stats"].get("images_with_alt", 0) for p in office)
     pdfs = [p for p in c.pages if p.get("kind") == "pdf"]
     badpdf = [p for p in pdfs if not p["stats"].get("tagged") or p["stats"].get("looks_scanned")]
-    review("8.01", "External tools/publisher accessibility: instructor confirms with the publisher.")
-    put("8.02", "1" if not blink else "0", f"auto: {blink} blinking elements, {sum(s.get('headings',0) for s in stats)} headings in {len(stats)} HTML pages (screen-reader navigation needs a manual check)")
-    put("8.03", "0" if red else "1", f"auto: {red} red-text uses (color-only cue risk); contrast needs a manual check")
-    if imgs:
-        put("8.04", "1" if not noalt else "0", f"auto: {noalt} of {imgs} images in pages have no alt attribute; video captions/transcripts need a manual check")
+    review("8.01", "External tools/publisher accessibility (e.g. Sherpath, Integrity Advocate): instructor confirms with the publisher.")
+    if html:
+        put("8.02", "1" if not blink else "0", f"auto: {blink} blinking elements in {len(html)} HTML pages; heading structure needs a manual check")
+        put("8.03", "0" if red else "1", f"auto: {red} red-text uses (color-only cue risk); contrast needs a manual check")
+        put("8.06", "1" if not gen else "0", f"auto: {gen} 'click here'-style links; keyboard-only use needs a manual check")
     else:
-        review("8.04", "No images found in collected pages; captions/transcripts need a manual check.")
-    if pdfs:
-        put("8.05", "1" if not badpdf else "0", f"auto: {len(badpdf)} of {len(pdfs)} PDFs untagged or scanned: " + "; ".join(p['title'] for p in badpdf[:3]))
+        review("8.02", "No HTML pages in the course to inspect; check headings, animations and layout by hand.")
+        review("8.03", "No HTML pages to inspect; check font size/contrast and color-only cues by hand (also inside PowerPoints/Word files).")
+        review("8.06", "No HTML pages to inspect; check that links use descriptive text.")
+    n_vid = len(c.videos)
+    if n_vid or o_imgs:
+        bits = []
+        if n_vid:
+            bits.append(f"{n_vid} uploaded videos: captions/transcripts must be checked (D2L auto-captions need a read-through)")
+        if o_imgs:
+            bits.append(f"{o_alt} of {o_imgs} images in Word/PowerPoint files have alt text")
+        put("8.04", "0" if (n_vid or o_alt < o_imgs) else "1", "auto: " + "; ".join(bits))
+        review("8.04", "Confirm captions on every video and alt text on images.")
     else:
-        review("8.05", "No PDFs found; Word/PowerPoint accessibility needs a manual check.")
-    put("8.06", "1" if not gen else "0", f"auto: {gen} 'click here'-style links; keyboard-only use needs a manual check")
+        review("8.04", "No images or videos found; check captions/transcripts by hand.")
+    if pdfs or office:
+        notes = []
+        if pdfs:
+            notes.append(f"{len(badpdf)} of {len(pdfs)} PDFs untagged or scanned")
+        if office:
+            notes.append(f"{len(office)} Word/PowerPoint files (accessibility checker not run)")
+        put("8.05", "0" if badpdf else "1", "auto: " + "; ".join(notes))
+        review("8.05", "Run Word/PowerPoint's accessibility checker on uploaded files, or use the college's ADA tool (Panorama).")
+    else:
+        review("8.05", "No uploaded files found.")
     review("8.07", "LMS-built components are accessible by default; confirm.")
     kw("8.08", r"accommodation")
     review("8.09", "Extended time / accessible question types: check quiz settings.")
 
     # ---------- Section 9 ----------
     q = d.get("qwickly") or {}
-    if q.get("found"):
-        txt = " ".join(f.get("text", "") for f in q.get("frames", []))
-        put("9.01", "1" if SEARCH(r"present|absent|attendance|session", txt) else "0",
-            "auto: Qwickly found; see screenshots/qwickly.png (confirm sessions are taken regularly)")
-        review("9.01", "Confirm attendance is taken on a regular schedule (Qwickly screenshot attached).")
+    qtxt = " ".join(f.get("text", "") for f in q.get("frames", []))
+    if q.get("found") and qtxt:
+        put("9.01", "1" if SEARCH(r"present|absent|attendance|session|roster", qtxt) else "0",
+            "auto: Qwickly opened (see screenshots/qwickly.png); confirm sessions are taken on a regular schedule")
+        review("9.01", "Confirm attendance is taken regularly (Qwickly screenshot attached).")
     else:
-        review("9.01", "Qwickly could not be opened automatically; check attendance records by hand.")
+        review("9.01", "Qwickly could not be opened automatically; check attendance records by hand." +
+               (" The course navbar links were scanned: " + ", ".join(sorted({(l.get('text') or '')[:20] for l in (d.get('nav') or {}).get('links', []) if re.search('qwickly|attendance', l.get('text') or '', re.I)})) if d.get("nav") else ""))
     review("9.02", "Participation visible to students: check the student view of Qwickly / gradebook.")
     gi = [g for g in c.grades if isinstance(g, dict)]
     if gi:
-        put("9.03", "1", f"auto: {len(gi)} grade items; verify they match the syllabus grading method")
+        hidden = [g.get("Name") for g in gi if g.get("IsHidden")]
+        weighted = (d.get("grade_setup") or {}).get("GradingSystem") == "Weighted"
+        cats = [g for g in gi if g.get("GradeType") == "Category"]
+        wsum = sum((g.get("Weight") or 0) for g in cats) if weighted else None
+        note = f"auto: {len(gi)} grade items" + (f"; weighted, category weights total {wsum:g}%" if weighted and cats else "")
+        ok = (not weighted) or not cats or abs((wsum or 0) - 100) < 0.5
+        put("9.03", "1" if ok else "0", note + "; verify against the syllabus grading method")
         n_assess = len(c.dropbox) + len(c.quizzes) + len(c.forum_topics)
-        put("9.04", grade_fraction(len(gi) / max(1, n_assess), 0.8, 0.2),
-            f"auto: {len(gi)} grade items vs {n_assess} assessments")
+        put("9.04", grade_fraction(min(1.0, len(gi) / max(1, n_assess)), 0.8, 0.2),
+            f"auto: {len(gi)} grade items for {n_assess} dropboxes/quizzes/discussions (plus external work such as Sherpath)")
+        put("9.06", "1" if not hidden else "0",
+            "auto: no grade items hidden from students" if not hidden else f"auto: {len(hidden)} hidden grade items: " + "; ".join(hidden[:3]))
     else:
         review("9.03", "No grade items could be read (role may not allow it).")
     review("9.05", "Current/accurate grades need a look at the gradebook.")
-    review("9.06", "Gradebook item visibility: check Grades > Settings or the student view.")
     review("9.07", "Overall/current grade visibility: check Grades > Settings or the student view.")
 
     # ---------- header ----------

@@ -98,6 +98,21 @@ def docx_info(data):
         return "", {"error": str(e)}
 
 
+def pptx_info(data):
+    try:
+        z = zipfile.ZipFile(io.BytesIO(data))
+        slides = sorted(n for n in z.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", n))
+        text, pics, alt = [], 0, 0
+        for n in slides:
+            xml = z.read(n).decode("utf8", "ignore")
+            text += re.findall(r"<a:t>([^<]*)</a:t>", xml)
+            pics += len(re.findall(r"<p:pic>", xml))
+            alt += len(re.findall(r'<p:cNvPr[^>]*\bdescr="[^"]+"', xml))
+        return " ".join(text), {"slides": len(slides), "images": pics, "images_with_alt": alt}
+    except Exception as e:
+        return "", {"error": str(e)}
+
+
 def extract(name, data):
     n = name.lower().split("?")[0]
     if n.endswith((".html", ".htm")):
@@ -109,6 +124,9 @@ def extract(name, data):
     if n.endswith(".docx"):
         t, s = docx_info(data)
         return "docx", t, s
+    if n.endswith(".pptx"):
+        t, st = pptx_info(data)
+        return "pptx", t, st
     if n.endswith(".txt"):
         return "txt", data.decode("utf8", "ignore"), {}
     return None, "", {}

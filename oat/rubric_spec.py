@@ -87,7 +87,6 @@ ITEMS = [
     ("5.01", 5, "Quiz / Exam"),
     ("5.02", 5, "Online discussion"),
     ("5.03", 5, "Student Self-Assessment"),
-    ("5.04", 5, "Process by which"),
     ("5.05", 5, "Review (peer"),
     ("5.06", 5, "Case Study"),
     ("5.07", 5, "Project"),

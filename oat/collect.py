@@ -198,7 +198,7 @@ def flatten_toc(modules, trail=()):
         yield from flatten_toc(m.get("Modules") or [], here)
 
 
-FILE_EXT = (".html", ".htm", ".pdf", ".docx", ".txt")
+FILE_EXT = (".html", ".htm", ".pdf", ".docx", ".pptx", ".txt")
 MAX_PAGES = 150
 
 
@@ -265,8 +265,12 @@ def collect(d2l, org):
     data["grade_items"] = d2l.get(d2l.le(f"/{org}/grades/"), "grade_items")
     data["grade_setup"] = d2l.get(d2l.le(f"/{org}/grades/setup/"), "grade_setup")
     data["calendar_events"] = d2l.get(d2l.le(f"/{org}/calendar/events/myEvents/"), "calendar")
-    data["classlist_staff"] = d2l.get(d2l.lp(f"/enrollments/orgUnits/{org}/users/?roleId=&pageSize=200"),
-                                      "enrollments")
+    # Only staff are kept: names/roles of non-students. No student names or emails are stored.
+    enr = d2l.get(d2l.lp(f"/enrollments/orgUnits/{org}/users/?roleId=&pageSize=200"), "enrollments") or {}
+    data["classlist_staff"] = {"Items": [
+        {"User": {"DisplayName": (i.get("User") or {}).get("DisplayName")},
+         "Role": {"Name": (i.get("Role") or {}).get("Name")}}
+        for i in (enr.get("Items") or []) if (i.get("Role") or {}).get("Name") not in (None, "Student")]}
     data["api_errors"] = d2l.errors
     return data
 
@@ -282,34 +286,98 @@ SHOTS = [  # label, path template (org substituted)
 ]
 
 
-def qwickly(page, base, org, shots_dir):
-    """Best-effort: find and open Qwickly Attendance, screenshot it, and capture visible text.
-    Qwickly is an LTI tool inside an iframe, so the layout can differ; the screenshot is the
-    evidence the reviewer should look at."""
-    info = {"found": False}
+DEEP_TEXT_JS = """() => {
+  const out = [];
+  const walk = (n) => {
+    if (n.nodeType === 3) { const t = n.textContent.trim(); if (t) out.push(t); return; }
+    if (n.nodeType !== 1 && n.nodeType !== 11) return;
+    if (n.nodeType === 1 && ['SCRIPT','STYLE','NOSCRIPT'].includes(n.tagName)) return;
+    if (n.shadowRoot) walk(n.shadowRoot);
+    for (const ch of n.childNodes) walk(ch);
+  };
+  walk(document.body);
+  return out.join(' ');
+}"""
+LINKS_JS = "els => els.map(e => ({text: (e.innerText || e.textContent || '').trim().slice(0, 80), href: e.href || ''}))"
+
+
+def deep_text(page):
+    """Visible text of the page and its iframes, including web-component (shadow DOM) content."""
+    parts = []
+    for fr in page.frames:
+        try:
+            t = fr.evaluate(DEEP_TEXT_JS)
+            if t and len(t) > 20:
+                parts.append({"frame": fr.url, "text": t[:20000]})
+        except Exception:
+            pass
+    return parts
+
+
+def page_links(page):
+    try:
+        return page.locator("a").evaluate_all(LINKS_JS)
+    except Exception:
+        return []
+
+
+def nav_scan(page, base, org):
+    """Open each navbar dropdown and record the links inside (Qwickly is often under Tools/More)."""
+    info = {"links": [], "menus": {}}
     try:
         page.goto(f"{base}/d2l/home/{org}", wait_until="networkidle", timeout=30000)
-        info["nav_links"] = [t.strip() for t in page.locator("a").all_inner_texts() if t.strip()][:200]
-        link = page.locator("a", has_text=re.compile(r"qwickly|attendance", re.I)).first
-        if link.count() == 0:
-            return info
-        info["found"] = True
-        info["link_text"] = link.inner_text().strip()
-        link.click()
-        page.wait_for_load_state("networkidle", timeout=30000)
-        time.sleep(4)
-        page.screenshot(path=str(shots_dir / "qwickly.png"), full_page=True)
-        info["url"] = page.url
-        texts = []
-        for fr in page.frames:
+        time.sleep(2)
+        info["links"] = page_links(page)
+        seen = {(l["text"], l["href"]) for l in info["links"]}
+        for label in ["Course Performance", "Communication", "Assessments", "Tools", "Help", "More"]:
             try:
-                texts.append({"frame": fr.url, "text": fr.inner_text("body", timeout=4000)[:6000]})
+                page.get_by_text(label, exact=True).first.click(timeout=3000)
+                time.sleep(1)
+                now = page_links(page)
+                new = [l for l in now if (l["text"], l["href"]) not in seen and l["text"]]
+                info["menus"][label] = new
+                seen |= {(l["text"], l["href"]) for l in new}
+                page.keyboard.press("Escape")
             except Exception:
-                pass
-        info["frames"] = texts
+                info["menus"][label] = None
     except Exception as e:
         info["error"] = str(e)
     return info
+
+
+def find_link(nav, pattern):
+    allv = list(nav.get("links", []))
+    for v in (nav.get("menus") or {}).values():
+        allv += v or []
+    for l in allv:
+        if re.search(pattern, l["text"] or "", re.I) or re.search(pattern, l["href"] or "", re.I):
+            return l
+    return None
+
+
+def open_and_capture(page, link, shot_path):
+    out = {"found": True, "link_text": link["text"], "link_href": link["href"]}
+    try:
+        page.goto(link["href"], wait_until="networkidle", timeout=40000)
+        time.sleep(4)
+        page.screenshot(path=str(shot_path), full_page=True)
+        out["url"] = page.url
+        out["frames"] = deep_text(page)
+    except Exception as e:
+        out["error"] = str(e)
+    return out
+
+
+def syllabus_and_qwickly(page, base, org, shots_dir):
+    nav = nav_scan(page, base, org)
+    res = {"nav": nav, "syllabus_tool": {"found": False}, "qwickly": {"found": False}}
+    syl = find_link(nav, r"^syllabus$|/syllabus")
+    if syl:
+        res["syllabus_tool"] = open_and_capture(page, syl, shots_dir / "syllabus.png")
+    qw = find_link(nav, r"qwickly|attendance")
+    if qw:
+        res["qwickly"] = open_and_capture(page, qw, shots_dir / "qwickly.png")
+    return res
 
 
 def run_collect(course, base_hint=None, out="out", profile="session", headless=False,
@@ -351,7 +419,8 @@ def run_collect(course, base_hint=None, out="out", profile="session", headless=F
         data["login_method"] = how
         data["whoami"] = logged_in(d2l)
         try:
-            data["qwickly"] = qwickly(page, base, org, outdir / "screenshots")
+            extra = syllabus_and_qwickly(page, base, org, outdir / "screenshots")
+            data["nav"], data["syllabus_tool"], data["qwickly"] = extra["nav"], extra["syllabus_tool"], extra["qwickly"]
         except Exception as e:
             data["qwickly"] = {"found": False, "error": str(e)}
         if shots:
