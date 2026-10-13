@@ -301,6 +301,15 @@ DEEP_TEXT_JS = """() => {
 LINKS_JS = "els => els.map(e => ({text: (e.innerText || e.textContent || '').trim().slice(0, 80), href: e.href || ''}))"
 
 
+def settle(page, seconds=4):
+    """D2L pages never go 'network idle' (widgets keep polling), so wait for load plus a short pause."""
+    try:
+        page.wait_for_load_state("load", timeout=20000)
+    except Exception:
+        pass
+    time.sleep(seconds)
+
+
 def deep_text(page):
     """Visible text of the page and its iframes, including web-component (shadow DOM) content."""
     parts = []
@@ -325,8 +334,8 @@ def nav_scan(page, base, org):
     """Open each navbar dropdown and record the links inside (Qwickly is often under Tools/More)."""
     info = {"links": [], "menus": {}}
     try:
-        page.goto(f"{base}/d2l/home/{org}", wait_until="networkidle", timeout=30000)
-        time.sleep(2)
+        page.goto(f"{base}/d2l/home/{org}", wait_until="domcontentloaded", timeout=30000)
+        settle(page)
         info["links"] = page_links(page)
         seen = {(l["text"], l["href"]) for l in info["links"]}
         for label in ["Course Performance", "Communication", "Assessments", "Tools", "Help", "More"]:
@@ -358,8 +367,28 @@ def find_link(nav, pattern):
 def open_and_capture(page, link, shot_path):
     out = {"found": True, "link_text": link["text"], "link_href": link["href"]}
     try:
-        page.goto(link["href"], wait_until="networkidle", timeout=40000)
-        time.sleep(4)
+        page.goto(link["href"], wait_until="domcontentloaded", timeout=40000)
+        settle(page)
+        page.screenshot(path=str(shot_path), full_page=True)
+        out["url"] = page.url
+        out["frames"] = deep_text(page)
+    except Exception as e:
+        out["error"] = str(e)
+    return out
+
+
+def capture_by_click(page, base, org, name_pattern, shot_path):
+    """Fallback: click the visible link/button by its label and capture whatever opens."""
+    out = {"found": False}
+    try:
+        page.goto(f"{base}/d2l/home/{org}", wait_until="domcontentloaded", timeout=30000)
+        settle(page)
+        loc = page.get_by_role("link", name=re.compile(name_pattern, re.I)).first
+        if loc.count() == 0:
+            return out
+        out.update(found=True, link_text=loc.inner_text().strip())
+        loc.click(timeout=8000)
+        settle(page)
         page.screenshot(path=str(shot_path), full_page=True)
         out["url"] = page.url
         out["frames"] = deep_text(page)
@@ -372,11 +401,15 @@ def syllabus_and_qwickly(page, base, org, shots_dir):
     nav = nav_scan(page, base, org)
     res = {"nav": nav, "syllabus_tool": {"found": False}, "qwickly": {"found": False}}
     syl = find_link(nav, r"^syllabus$|/syllabus")
-    if syl:
+    if syl and syl.get("href"):
         res["syllabus_tool"] = open_and_capture(page, syl, shots_dir / "syllabus.png")
+    if not res["syllabus_tool"].get("frames"):
+        res["syllabus_tool"] = capture_by_click(page, base, org, r"^syllabus$", shots_dir / "syllabus.png")
     qw = find_link(nav, r"qwickly|attendance")
-    if qw:
+    if qw and qw.get("href"):
         res["qwickly"] = open_and_capture(page, qw, shots_dir / "qwickly.png")
+    if not res["qwickly"].get("frames"):
+        res["qwickly"] = capture_by_click(page, base, org, r"qwickly|attendance", shots_dir / "qwickly.png")
     return res
 
 
@@ -406,8 +439,9 @@ def run_collect(course, base_hint=None, out="out", profile="session", headless=F
             who, how = ensure_login(d2l, login)
             print("Logged in as:", (who or {}).get("FirstName"), (who or {}).get("LastName"))
             try:  # let any post-login redirects finish before reading data
-                page.wait_for_load_state("networkidle", timeout=20000)
-                page.goto(f"{base}/d2l/home/{org}", wait_until="load", timeout=30000)
+                settle(page)
+                page.goto(f"{base}/d2l/home/{org}", wait_until="domcontentloaded", timeout=30000)
+                settle(page)
             except Exception:
                 pass
         import traceback
@@ -426,7 +460,8 @@ def run_collect(course, base_hint=None, out="out", profile="session", headless=F
         if shots:
             for label, path in SHOTS:
                 try:
-                    page.goto(base + path.format(org=org), wait_until="networkidle", timeout=30000)
+                    page.goto(base + path.format(org=org), wait_until="domcontentloaded", timeout=30000)
+                    settle(page)
                     page.screenshot(path=str(outdir / "screenshots" / f"{label}.png"), full_page=True)
                 except Exception as e:  # screenshots are best-effort
                     data.setdefault("screenshot_errors", {})[label] = str(e)
