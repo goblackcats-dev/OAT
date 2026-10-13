@@ -13,7 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import analyze, creds, pdf_fill
+from . import analyze, content, creds, pdf_fill
 from .collect import run_collect
 
 DEFAULT_BASE = "https://learn.jalc.edu"
@@ -56,7 +56,22 @@ def open_file(p):
         pass
 
 
+def attach_syllabus(data, path):
+    """Use a syllabus file (PDF/Word/HTML/text) the instructor supplies, e.g. exported from Simple Syllabus."""
+    p = Path(path.strip('"'))
+    if not p.exists():
+        sys.exit(f"Syllabus file not found: {p}")
+    kind, text, _ = content.extract(p.name, p.read_bytes())
+    if not text.strip():
+        sys.exit(f"Could not read any text from {p.name} (supported: .pdf .docx .pptx .html .txt; scanned PDFs need OCR).")
+    data["syllabus_tool"] = {"found": True, "source": "file", "file": p.name,
+                             "frames": [{"frame": "file:" + p.name, "external": True, "text": text[:60000]}]}
+    print(f"Using syllabus file: {p.name} ({len(text):,} characters)")
+
+
 def finish(a, data):
+    if getattr(a, "syllabus", None):
+        attach_syllabus(data, a.syllabus)
     result = analyze.analyze(data)
     org = data["orgUnitId"]
     print("\nVerbal confirmations (only you can give these; answer honestly, or 'skip' to leave blank):")
@@ -84,6 +99,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("course", nargs="?")
     ap.add_argument("--refill", metavar="COURSE_ID", help="rebuild the PDF from an edited scores.json")
+    ap.add_argument("--syllabus", metavar="FILE", help="syllabus file to read (PDF/Word/text) if the Syllabus tool can't be read")
     ap.add_argument("--reanalyze", metavar="COURSE_ID", help="re-score saved data (no login needed)")
     ap.add_argument("--set-login", action="store_true")
     ap.add_argument("--forget-login", action="store_true")

@@ -38,8 +38,12 @@ class Ctx:
         self.grades = d.get("grade_items") or []
         self.top_modules = [m for m in self.modules if len(m["path"]) == 1]
         # Only text from the tool's own frame counts. D2L's own page chrome (menus) is not syllabus text.
-        self.syl_tool = " ".join(f.get("text", "") for f in (d.get("syllabus_tool") or {}).get("frames", [])
-                                 if f.get("external") or (f.get("frame") and "/d2l/" not in f["frame"]))
+        ERR = r"error has occurred|could not locate a matching account|unable to locate account"
+        syl_frames = [f for f in (d.get("syllabus_tool") or {}).get("frames", [])
+                      if f.get("external") or (f.get("frame") and "/d2l/" not in f["frame"])]
+        self.syl_file = (d.get("syllabus_tool") or {}).get("source") == "file"
+        self.syl_error = (not self.syl_file) and any(SEARCH(ERR, f.get("text", "")) for f in syl_frames)
+        self.syl_tool = " ".join(f.get("text", "") for f in syl_frames if not SEARCH(ERR, f.get("text", "")))
         self.syllabus = (" ".join(p["text"] for p in self.pages if SEARCH("syllabus", p["title"] + p["url"]))
                          + " " + self.syl_tool).strip()
         self.grade_names = [g.get("Name") or "" for g in self.grades if isinstance(g, dict)]
@@ -92,14 +96,20 @@ def analyze(d):
                   for l in (d.get("nav") or {}).get("links", [])) \
         or "Syllabus" in (d.get("qwickly") or {}).get("nav_links", []) \
         or (d.get("syllabus_tool") or {}).get("found")
-    if syl_pages or syl_topics or nav_syl:
+    if c.syl_error:
+        review("1.01", "The Syllabus tab opens Simple Higher Ed, which showed the error 'could not locate a matching account' for your login. "
+                       "Check with the Teaching and Learning Center, and confirm that students can open the syllabus. Not scored automatically.")
+    elif syl_pages or syl_topics or nav_syl:
         put("1.01", "1", "auto: syllabus found" + (" (Syllabus tool in the course navbar)" if nav_syl else ": " + (syl_pages or syl_topics)[0].get("title", "")))
     else:
         put("1.01", "X", "auto: no syllabus topic or Syllabus tool found")
+    if c.syl_file:
+        review("1.01", "Syllabus text came from a file you supplied. Confirm that students can open the same syllabus inside the course.")
     st = c.syllabus or c.corpus
     lbl = "syllabus" if c.syllabus else "course text"
     if not c.syllabus:
-        review("1.02-1.05", "The Syllabus is an external tool whose text could not be read, so these were checked against other course text only. Check the Syllabus tab by hand (objectives, materials, textbook, contact info, office hours).")
+        review("1.02-1.05", "The syllabus text could not be read, so syllabus items (1.02-1.05, 1.16-1.22) were checked against other course text only. "
+                            "Give me the syllabus as a file: OAT.exe --reanalyze 99316 --syllabus \"C:\\path\\syllabus.pdf\"")
     kw("1.02", r"(learning )?(objectives?|outcomes?)", st, lbl)
     kw("1.03", r"required (materials|text|resources)|materials|textbook|supplies", st, lbl)
     kw("1.04", r"\bISBN\b|\bedition\b", st, lbl)
