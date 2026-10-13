@@ -175,7 +175,7 @@ class Overlay:
         return base
 
 
-def fill_header(ov, pdf, header):
+def fill_header(ov, pdf, header, courses=()):
     pg = pdf.pages[0]
     lines = _lines(pg)
 
@@ -201,15 +201,40 @@ def fill_header(ov, pdf, header):
     for _, key in right:
         if header.get(key):
             ov.text(1, 296, ys[key], header[key], size=7.5)
-    if header.get("attendee"):
-        ov.text(1, 391, 201, header["attendee"], size=7.5)
+    # the checkbox before "Verbal confirmation: Instructor acknowledges ..." (all courses are covered by the rubric)
+    if header.get("acknowledged"):
+        for l in lines:
+            if l["text"].startswith("Verbal confirmation"):
+                ov.check(1, 14, 29, l["top"] - 2, l["top"] + 12)
+    # additional attendees (e.g. a new-member observer): role in x 388-463, name in x 469-598
+    for i, (role, name) in enumerate(header.get("additional_attendees", [])[:5]):
+        y = [201, 214, 240, 266, 291][i]
+        ov.text(1, 390, y, role, size=5.5)
+        ov.text(1, 469, y, name, size=7.5)
+    # "Additional Online/Hybrid/HyFlex Courses Taught" table: the six data rows are the last six rows
+    if courses:
+        rows = []
+        for t in pdf.pages[0].find_tables():
+            if t.bbox[1] > 340 and t.bbox[3] > 500:
+                rows = [r.bbox for r in t.rows if 18 < r.bbox[3] - r.bbox[1] < 26 and (r.bbox[2] - r.bbox[0]) > 500]
+        for bb, cr in zip(rows[-6:], courses):
+            top, bot = bb[1], bb[3]
+            ov.wrapped(1, 15, 101, top, bot, str(cr.get("id", "")), size=6.5)
+            ov.wrapped(1, 101, 261, top, bot, str(cr.get("title", "")), size=6.5)
+            ov.wrapped(1, 261, 315, top, bot, str(cr.get("meets", "")), size=7.5)
+            if cr.get("active") is True:
+                ov.check(1, 315, 366, top, bot)
+            elif cr.get("active") is False:
+                ov.wrapped(1, 366, 443, top, bot, str(cr.get("last_semester", "")), size=6.5)
+            if cr.get("notes"):
+                ov.wrapped(1, 443, 598, top, bot, str(cr["notes"]), size=6)
 
 
 def build(scores, rubric_path, out_path):
     pos, bands, boxes = locate(pdfplumber.open(rubric_path))
     pdf = pdfplumber.open(rubric_path)
     ov = Overlay(len(pdf.pages))
-    fill_header(ov, pdf, scores.get("header", {}))
+    fill_header(ov, pdf, scores.get("header", {}), scores.get("additional_courses", []))
     overflow = {}
     for iid, v in scores.get("items", {}).items():
         if iid not in pos:

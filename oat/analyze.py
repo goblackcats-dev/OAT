@@ -400,8 +400,7 @@ def analyze(d):
     course = d.get("course") or {}
     staff_name = f"{who.get('LastName', '')}, {who.get('FirstName', '')}".strip(", ")
     header = {"instructor": staff_name, "date": dt.date.today().strftime("%m/%d/%Y"),
-              "course_id": course.get("Code", ""), "course_title": course.get("Name", ""),
-              "attendee": "(self-assessment)"}
+              "course_id": course.get("Code", ""), "course_title": course.get("Name", "")}
     return {"header": header, "items": S, "review": REVIEW,
             "section_notes": {}, "strengths": "", "improvements": "", "changes": ""}
 

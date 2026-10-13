@@ -13,7 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import analyze, content, creds, evidence, pdf_fill
+from . import analyze, content, creds, evidence, pdf_fill, schedule
 from .collect import run_collect
 
 DEFAULT_BASE = "https://learn.jalc.edu"
@@ -101,6 +101,41 @@ def finish(a, data):
             result["review"].append({"id": iid, "reason": "Unanswered instructor confirmation (see evidence in review.md)."})
     result["verbal_answers"] = answers
 
+    # --- the rubric's fourth statement: the rubric applies to ALL my online/hybrid/HyFlex courses ---
+    print("\n[page 1] Instructor acknowledges that the rubric items apply to ALL of your online, hybrid and HyFlex courses.")
+    if "acknowledgement" in answers_in:
+        ack = str(answers_in["acknowledgement"]).strip().lower() in ("yes", "y", "true")
+    elif getattr(a, "skip_questions", False):
+        ack = False
+    elif getattr(a, "yes_confirm", False):
+        ack = True
+    else:
+        ack = ask_yn("Do you acknowledge this")
+    result["header"]["acknowledged"] = bool(ack)
+    answers["acknowledgement"] = ack
+
+    # --- page-1 header from the schedule spreadsheet ---
+    sched_path = (getattr(a, "schedule", None) or load_config().get("schedule") or "").strip('"')
+    if sched_path and Path(sched_path).exists():
+        try:
+            rows = schedule.load(sched_path)
+            who = data.get("whoami") or {}
+            me = schedule.find_instructor(rows, who.get("LastName", ""), who.get("FirstName", ""))
+            if me:
+                result["header"].update(schedule.header_for(me))
+                print(f"Schedule: found you ({me['instructor']}); facilitator {me.get('facilitator') or '(none yet)'}; "
+                      f"date {me.get('when') or '(not set yet)'}.")
+            else:
+                print("Schedule: your name was not found in the sign-up sheet.")
+            mine = schedule.my_sessions(rows, f"{who.get('FirstName', '')} {who.get('LastName', '')}")
+            print("Your committee assignments:" if mine else "You are not listed on any session in the schedule yet.")
+            for s in mine:
+                print(f"   - {s['instructor']} ({s['discipline']}), {s['role']}, {s['when']}")
+        except Exception as e:
+            print("Could not read the schedule file:", e)
+    elif sched_path:
+        print("Schedule file not found:", sched_path)
+
     # --- drafted text for the rubric's last page (only if empty) ---
     for k, v in evidence.draft_summary(result).items():
         if not result.get(k):
@@ -133,11 +168,16 @@ def main():
     ap.add_argument("--out", default="OAT_output")
     ap.add_argument("--headless", action="store_true")
     ap.add_argument("--browser-path")
+    ap.add_argument("--schedule", metavar="XLSX", help="the OAT Assessment Schedule spreadsheet (fills page 1; remembered)")
     ap.add_argument("--answers", metavar="FILE", help='JSON with your own answers, e.g. {"copyright":"yes","feedback":"no","accessibility":"skip"}')
     ap.add_argument("--skip-questions", action="store_true", help="do not ask the three confirmations (they stay unanswered)")
     ap.add_argument("--yes-confirm", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args()
 
+    if a.reanalyze and getattr(a, "schedule", None):
+        _c = load_config()
+        _c["schedule"] = a.schedule.strip('"')
+        CONFIG.write_text(json.dumps(_c))
     if a.reanalyze:
         f = Path(a.out) / "data" / a.reanalyze / "course.json"
         if not f.exists():
@@ -154,6 +194,9 @@ def main():
         return
 
     cfg = load_config()
+    if getattr(a, "schedule", None):
+        cfg["schedule"] = a.schedule.strip('"')
+        CONFIG.write_text(json.dumps(cfg))
     course = a.course
     if not course:
         last = cfg.get("last_course", "")
