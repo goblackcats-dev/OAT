@@ -454,6 +454,53 @@ def capture_by_click(page, base, org, name_pattern, shot_path):
     return out
 
 
+def capture_menu_item(page, base, org, item_pattern, shot_path,
+                      menus=("Course Performance", "Tools", "More", "Communication", "Assessments")):
+    """Open a navbar dropdown and CLICK an item that has no web address (it opens through script).
+    Handles the item loading in the same tab or in a new tab/window."""
+    out = {"found": False}
+    pat = re.compile(item_pattern, re.I)
+    for menu in menus:
+        try:
+            page.goto(f"{base}/d2l/home/{org}", wait_until="domcontentloaded", timeout=30000)
+            settle(page, 2)
+            page.get_by_text(menu, exact=True).first.click(timeout=4000)
+            time.sleep(1)
+            item = None
+            for loc in (page.get_by_role("menuitem", name=pat), page.get_by_role("link", name=pat),
+                        page.get_by_role("button", name=pat), page.get_by_text(pat)):
+                if loc.count() > 0:
+                    item = loc.first
+                    break
+            if item is None:
+                page.keyboard.press("Escape")
+                continue
+            out.update(found=True, menu=menu, link_text=item.inner_text().strip()[:80] if item.inner_text() else item_pattern)
+            before, start_url = set(page.context.pages), page.url
+            item.click(timeout=8000)
+            target, end = page, time.time() + 20
+            while time.time() < end:
+                new = [p for p in page.context.pages if p not in before]
+                if new:
+                    target = new[0]
+                    break
+                if page.url != start_url:
+                    break
+                time.sleep(0.5)
+            settle(target)
+            out["external_loaded"] = wait_external(target, base)
+            target.screenshot(path=str(shot_path), full_page=True)
+            out["url"] = target.url
+            out["new_tab"] = target is not page
+            out["frames"] = deep_text(target, base)
+            if target is not page:
+                target.close()
+            return out
+        except Exception as e:
+            out["error"] = f"{menu}: {e}"
+    return out
+
+
 def syllabus_and_qwickly(page, base, org, shots_dir):
     print("Scanning the course menus...")
     nav = nav_scan(page, base, org)
@@ -468,11 +515,16 @@ def syllabus_and_qwickly(page, base, org, shots_dir):
     print("Opening Qwickly attendance..." if qw else "No Qwickly link found in the menus.")
     if qw and qw.get("href") and not qw["href"].startswith("javascript"):
         res["qwickly"] = open_and_capture(page, qw, shots_dir / "qwickly.png", base)
+    if qw and not res["qwickly"].get("frames"):
+        print("Qwickly has no web address, so clicking it from the menu...")
+        res["qwickly"] = capture_menu_item(page, base, org, r"qwickly", shots_dir / "qwickly.png")
     j1 = find_link(nav, r"\bJ1\b")
     if j1:
         print("Opening J1 Grades & Attendance...")
-    if j1 and j1.get("href") and not j1["href"].startswith("javascript"):
-        res["j1"] = open_and_capture(page, j1, shots_dir / "j1.png", base)
+        if j1.get("href") and not j1["href"].startswith("javascript"):
+            res["j1"] = open_and_capture(page, j1, shots_dir / "j1.png", base)
+        if not res.get("j1", {}).get("frames"):
+            res["j1"] = capture_menu_item(page, base, org, r"\bJ1\b", shots_dir / "j1.png")
     if not any(f.get("external") for f in res["qwickly"].get("frames", [])) and not res["qwickly"].get("found"):
         res["qwickly"] = capture_by_click(page, base, org, r"qwickly|attendance", shots_dir / "qwickly.png")
     return res
