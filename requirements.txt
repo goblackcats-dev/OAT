@@ -1,6 +1,7 @@
-pdfplumber
-pypdf
-reportlab
-playwright
 keyring
 openpyxl
+pdfplumber
+playwright
+pypdf
+reportlab
+pyspellchecker

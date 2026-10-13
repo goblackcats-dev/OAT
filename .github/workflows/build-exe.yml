@@ -13,12 +13,14 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt pyinstaller
-      - name: Test the rubric filler
-        run: python -m oat.pdf_fill examples/sample_scores.json rubric.pdf sample_filled.pdf
+      - name: Test the rubric filler, schedule reader and spell checker
+        run: >
+          python -m oat.pdf_fill examples/sample_scores.json rubric.pdf sample_filled.pdf &&
+          python -c "from spellchecker import SpellChecker; import openpyxl, oat.schedule, oat.combine, oat.evidence; print('imports ok', len(SpellChecker().unknown(['priotiziation'])))"
       - name: Build exe
         run: >
           pyinstaller --onefile --name OAT --collect-all playwright
-          --collect-submodules keyring --hidden-import keyring.backends.Windows
+          --collect-submodules keyring --hidden-import keyring.backends.Windows --collect-data spellchecker --hidden-import openpyxl
           --add-data "rubric.pdf;." OAT_main.py
       - uses: actions/upload-artifact@v4
         with:

@@ -46,3 +46,25 @@ to Claude and ask it to review the scores and finish the PDF.
 ## Privacy
 No student names or emails are stored. Qwickly (which lists students) is read for attendance dates only, with no
 page text or screenshot kept. J1/Jenzabar is not read at all.
+
+## Everything the tool now does (one run)
+1. Logs in (saved login or by hand), lists the courses where you are an instructor, and lets you pick your OTHER online/hybrid/HyFlex
+   courses once (remembered; `--pick-courses` to redo, `--courses 123,456` to name them). Every course is scored, then combined:
+   **1 = in all courses, 0 = in some, X = in none**.
+2. Per course: modules, quizzes, dropboxes, discussions, grades, announcements, files (Word/PowerPoint/PDF text, links, alt text).
+3. Syllabus: reads the Syllabus tool; if it shows the Simple Syllabus account error it clicks the direct-login button, searches for the
+   course, picks the semester and clicks View. Fallback: `--syllabus file.pdf`.
+4. Qwickly attendance (dates only, never student names), the Panorama (ADA) report, and a fail-safe **student view** check (switches to the
+   student view to read what students see, then switches back; logs out if it cannot switch back). Skip with `--no-student-view`.
+5. Instructor activity as COUNTS only (discussion posts and replies, feedback on dropbox work). No post text, no student ids.
+6. Link checker for outside links, dictionary evidence for possible typos, Section 5 "Course Objective(s)" and "Rubric" columns,
+   consistency of the weekly modules.
+7. Page 1 from the Assessment Schedule spreadsheet (`--schedule file.xlsx`, remembered): facilitator, representatives, new-member observer, date,
+   plus the table of your other courses and the acknowledgement checkbox. It also lists the sessions where you are on the committee.
+8. The three instructor-only confirmations (evidence, then YOUR answer) and `claude_prompt.md` for review in Claude.
+
+Everything is a PROPOSAL. You review it; the committee decides.
+
+### Unverified on the real site (first real run will show)
+Qwickly Records tab, the Simple Syllabus dashboard steps, the student-view role switch, the Panorama report layout, the enrollments list.
+Each fails soft: a step that cannot run is listed in `review.md` instead of guessing.
