@@ -63,7 +63,7 @@ class D2L:
                     self.page.wait_for_load_state("load", timeout=15000)
                 except Exception:
                     pass
-                time.sleep(1.5)
+                self.page.wait_for_timeout(1500)
         return {"status": 0, "body": None, "b64": None, "text": f"evaluate failed: {last}"}
 
     def get(self, path, key=None):
@@ -158,7 +158,7 @@ def try_auto_login(d2l, login):
     while time.time() < end:
         if logged_in(d2l):
             return True
-        time.sleep(1.5)
+        d2l.page.wait_for_timeout(1500)
     return False
 
 
@@ -181,7 +181,7 @@ def ensure_login(d2l, login=None, minutes=10):
         who = logged_in(d2l)
         if who:
             return who, "manual_after_auto_failed" if login else "manual"
-        time.sleep(2)
+        d2l.page.wait_for_timeout(2000)
     sys.exit("Timed out waiting for login.")
 
 
@@ -313,7 +313,7 @@ def settle(page, seconds=4):
         page.wait_for_load_state("load", timeout=20000)
     except Exception:
         pass
-    time.sleep(seconds)
+    page.wait_for_timeout(int(seconds * 1000))
 
 
 def _host(url):
@@ -354,11 +354,11 @@ def wait_external(page, base, timeout=40):
                 try:
                     t = fr.evaluate(DEEP_TEXT_JS)
                     if t and len(t) > 300:
-                        time.sleep(2)
+                        page.wait_for_timeout(2000)
                         return True
                 except Exception:
                     pass
-        time.sleep(2)
+        page.wait_for_timeout(2000)
     return False
 
 
@@ -400,7 +400,7 @@ def nav_scan(page, base, org):
         for label in ["Course Performance", "Communication", "Assessments", "Tools", "Help", "More"]:
             try:
                 page.get_by_text(label, exact=True).first.click(timeout=3000)
-                time.sleep(1)
+                page.wait_for_timeout(1000)
                 now = page_links(page)
                 new = [l for l in now if (l["text"], l["href"]) not in seen and l["text"]]
                 info["menus"][label] = new
@@ -471,7 +471,7 @@ def capture_menu_item(page, base, org, item_pattern, shot_path,
             page.goto(f"{base}/d2l/home/{org}", wait_until="domcontentloaded", timeout=30000)
             settle(page, 2)
             page.get_by_text(menu, exact=True).first.click(timeout=4000)
-            time.sleep(1)
+            page.wait_for_timeout(1000)
             item = None
             for loc in (page.get_by_role("menuitem", name=pat), page.get_by_role("link", name=pat),
                         page.get_by_role("button", name=pat), page.get_by_text(pat)):
@@ -492,7 +492,7 @@ def capture_menu_item(page, base, org, item_pattern, shot_path,
                     break
                 if page.url != start_url:
                     break
-                time.sleep(0.5)
+                page.wait_for_timeout(500)
             settle(target)
             out["external_loaded"] = wait_external(target, base)
             target.screenshot(path=str(shot_path), full_page=True)
@@ -536,16 +536,16 @@ def follow_simple_syllabus(page, base, org, shot_path, login):
             if new:
                 target = new[0]
                 break
-            time.sleep(0.5)
+            page.wait_for_timeout(500)
         settle(target, 3)
         if login and target.locator("input[type='password']").count() > 0:
             out["signed_in_with_saved_login"] = fill_login_form(target, login)
             settle(target, 4)
         end = time.time() + 40  # the Simple Syllabus app is a slow single-page app
         while time.time() < end:
-            if sum(len(f["text"]) for f in deep_text(target, base)) > 800:
+            if sum(len(f["text"]) for f in deep_text(target, base)) > 500:
                 break
-            time.sleep(2)
+            page.wait_for_timeout(2000)
         target.screenshot(path=str(shot_path), full_page=True)
         out["url"] = target.url
         out["new_tab"] = target is not page
