@@ -707,7 +707,8 @@ def follow_simple_syllabus(page, base, org, shot_path, login, course_code="", te
             target.set_viewport_size({"width": 1280, "height": 900})   # popups open narrow (mobile layout)
         except Exception:
             pass
-        if "dashboard" in target.url.lower() or "simplesyllabus" in target.url.lower():
+        if ("dashboard" in target.url.lower() or "simplesyllabus" in target.url.lower()
+                or target.get_by_placeholder(re.compile("looking for", re.I)).count() > 0):
             steps = open_course_in_dashboard(target, base, course_code, term)
             newp = steps.pop("page", None)
             out["dashboard_steps"] = steps
