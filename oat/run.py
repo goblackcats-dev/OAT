@@ -48,11 +48,15 @@ def make_picker(a, base, primary_org):
             cutoff = (date.today() - timedelta(days=400)).isoformat()
             print("\nCourses where you are an instructor (newest first):")
             sug = []
-            for i, cx in enumerate(courses, 1):
+            shown = [(i, cx) for i, cx in enumerate(courses, 1)
+                     if cx["id"] == primary_org or (cx["mode"] and (cx["active"] or cx["end"] >= cutoff))]
+            print("(Showing hybrid/online courses from the last ~13 months; use --courses to name any other course.)")
+            for i, cx in shown:
                 mark = "  <- the course being assessed" if cx["id"] == primary_org else ""
-                print(f"  [{i}] {cx['code']:<24} {cx['term']:<12} {cx['mode'] or '?':<7} "
-                      f"{'active' if cx['active'] else 'ended ' + cx['end']}{mark}")
-                if cx["id"] != primary_org and cx["mode"] and (cx["active"] or cx["end"] >= cutoff):
+                built = "" if cx.get("modules") is None else (f"  {cx['modules']} modules" if cx["modules"] else "  EMPTY (not built yet)")
+                print(f"  [{i}] {cx['code']:<22} {cx['term']:<12} {cx['mode'] or '?':<7} "
+                      f"{'active' if cx['active'] else 'inactive':<8}{built}{mark}")
+                if cx["id"] != primary_org and cx.get("modules"):
                     sug.append(i)
             print("The rubric applies to ALL your online, hybrid and HyFlex courses, so pick the others to include.")
             raw = input(f"Numbers to include (e.g. 2,3), Enter = suggested {sug}, 0 = none: ").strip()
@@ -116,6 +120,10 @@ def finish(a, data, extras=()):
     primary = analyze.analyze(data)
     org = data["orgUnitId"]
     label = lambda d: ((d.get("course") or {}).get("Code") or d.get("orgUnitId"))
+    empty = [label(xd) for _, xd in extras if not (xd.get("modules") or xd.get("topics"))]
+    if empty:
+        print("Not scored (empty course shells, nothing built yet): " + ", ".join(empty))
+    extras = [(xo, xd) for xo, xd in extras if (xd.get("modules") or xd.get("topics"))]
     others = [(label(xd), analyze.analyze(xd)) for _, xd in extras]
     if others:
         from . import combine
@@ -137,6 +145,8 @@ def finish(a, data, extras=()):
     if choice.get("meets", {}).get(org):
         result["header"]["in_person_meets"] = choice["meets"][org]
     result["additional_courses"] = rows[:6]
+    if empty:
+        result["review"].append({"id": "courses", "reason": "Empty course shells were left out of the 'all courses' scoring (nothing built yet): " + ", ".join(empty)})
     ev = evidence.collect(data, result, others=[xd for _, xd in extras])
 
     # --- the three instructor-only confirmations: evidence first, then YOUR answer ---

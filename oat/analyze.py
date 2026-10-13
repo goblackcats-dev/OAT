@@ -110,8 +110,12 @@ def spelling_suspects(c, limit=25):
     texts += [(x.get("Name") or "") + " " + re.sub("<[^>]+>", " ", _t(x.get("CustomInstructions")) or _t(x.get("Description")) or "")
               for x in c.dropbox + c.quizzes + c.forum_topics]
     words = {}
+    me = ((c.d.get("whoami") or {}).get("LastName") or "").lower()
     for t in texts:
+        t = re.sub(r"https?://\S+", " ", t)
         for w in re.findall(r"[A-Za-z][A-Za-z']{4,}", t):
+            if w.lower() == me:
+                continue
             if "'" in w or re.search(r"[a-z][A-Z]", w):   # possessives and CamelCase names (ChatGPT) are not typos
                 continue
             words.setdefault(w.lower(), w)
@@ -478,26 +482,29 @@ def analyze(d):
     # ---------- Section 9 ----------
     q = d.get("qwickly") or {}
     rec = q.get("records") or {}
-    qdates = [dt.date.fromisoformat(x) for x in rec.get("dates", [])]
-    try:  # only dates inside the course's own window count (the page also shows today's date etc.)
+    all_dates = sorted(dt.date.fromisoformat(x) for x in rec.get("dates", []))
+    cs = ce = None
+    try:
         cs = dt.datetime.fromisoformat(d["course"]["StartDate"].replace("Z", "+00:00")).date()
         ce = dt.datetime.fromisoformat(d["course"]["EndDate"].replace("Z", "+00:00")).date()
-        qdates = [x for x in qdates if cs - dt.timedelta(days=3) <= x <= ce + dt.timedelta(days=3)]
     except Exception:
-        cs = ce = None
-    if q.get("found") and len(qdates) >= 2:
-        s0, e0 = (cs, ce) if cs and ce else (min(qdates), max(qdates))
-        weeks = {x - dt.timedelta(days=x.weekday()) for x in qdates}
-        span = ((e0 - dt.timedelta(days=e0.weekday())) - (s0 - dt.timedelta(days=s0.weekday()))).days // 7 + 1
-        put("9.01", grade_fraction(min(1.0, len(weeks) / max(1, span)), 0.8, 0.3),
-            f"auto: Qwickly Records show {len(qdates)} attendance dates covering {len(weeks)} of {span} course weeks "
-            f"({min(qdates):%m/%d}-{max(qdates):%m/%d})")
-        review("9.01", "Confirm attendance was taken for every class meeting.")
+        pass
+    inside = [x for x in all_dates if cs and ce and cs - dt.timedelta(days=3) <= x <= ce + dt.timedelta(days=3)]
+    monday = lambda x: x - dt.timedelta(days=x.weekday())
+    if q.get("found") and (len(inside) >= 2 or len(all_dates) >= 2):
+        use = inside if len(inside) >= 2 else all_dates
+        s0, e0 = (cs, ce) if len(inside) >= 2 else (min(use), max(use))
+        weeks = {monday(x) for x in use}
+        span = (monday(e0) - monday(s0)).days // 7 + 1
+        note = (f"auto: Qwickly Records show {len(use)} attendance dates covering {len(weeks)} of {span} weeks ({min(use):%m/%d/%Y} to {max(use):%m/%d/%Y})")
+        if len(inside) < 2 and cs:
+            note += f". These dates are outside this course shell's own dates ({cs:%m/%d/%Y} to {ce:%m/%d/%Y}); the shell may be reused for a later term."
+        put("9.01", grade_fraction(min(1.0, len(weeks) / max(1, span)), 0.8, 0.3), note)
+        review("9.01", "Confirm attendance was taken for every class meeting of the term being assessed.")
     elif q.get("found"):
         review("9.01", "Qwickly opened" + (" and its Records tab was read" if rec.get("records_opened") else "") +
-               ", but no attendance dates inside this course's dates were found" +
-               (" (the course may have ended, or the roster is empty)" if True else "") +
-               ". Check the attendance records by hand. Qwickly was not captured because it lists student names.")
+               ", but no attendance dates were found. Check the attendance records by hand. "
+               "Qwickly was not captured because it lists student names.")
     else:
         review("9.01", "Qwickly could not be opened automatically (Course Performance > Attendance Qwickly). Check attendance records by hand.")
     review("9.02", "Participation visible to students: check the student view of Qwickly / gradebook.")
@@ -522,12 +529,20 @@ def analyze(d):
 
     # ---------- Panorama (ADA tool) and the student view ----------
     pan = d.get("panorama") or {}
-    if pan.get("found") and (pan.get("metrics") or pan.get("text_excerpt")):
+    if pan.get("found"):
         m = pan.get("metrics") or {}
-        review("8.05", f"The college's Panorama (ADA) report was read (percentages {m.get('percent')}, counts {m.get('counts')}). "
-                       f"See screenshots/panorama.png and interpret it for Section 8. Excerpt: {pan.get('text_excerpt', '')[:260]}")
-        if "8.05" in S:
-            S["8.05"]["note"] += f" | Panorama figures: {m.get('percent')} / {m.get('counts')}"
+        if m.get("files_processed"):
+            note = f"Panorama: score {m.get('score')}%, {m['files_processed']} files processed, {m.get('files_remediated')} remediated"
+            sc = m.get("score")
+            if sc is not None:
+                put("8.05", "1" if sc >= 80 else "0" if sc >= 50 else "X", "auto (Panorama): " + note[10:])
+            elif "8.05" in S:
+                S["8.05"]["note"] += " | " + note
+            review("8.05", note + ". See screenshots/panorama.png.")
+        else:
+            review("8.05", "The college's Panorama (ADA) report has not processed any files for this course yet (Total Files Processed 0, "
+                           "'Nothing to report yet'), so it cannot be used. Ask the Teaching and Learning Center whether AutoPilot is on. "
+                           "The file checks above come from this tool's own reading of your Word, PowerPoint and PDF files.")
     sv = d.get("student_view") or {}
     if sv.get("switched"):
         REVIEW[:] = [r for r in REVIEW if r["id"] not in ("9.06", "9.07", "9.02")]

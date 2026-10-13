@@ -415,7 +415,7 @@ def deep_text(page, base=None):
         try:
             t = fr.evaluate(DEEP_TEXT_JS)
             if t and len(t) > 20:
-                parts.append({"frame": fr.url, "external": bool(_host(fr.url) and _host(fr.url) != host),
+                parts.append({"frame": fr.url.split("?")[0], "external": bool(_host(fr.url) and _host(fr.url) != host),
                               "text": t[:30000]})
         except Exception:
             pass
@@ -616,52 +616,74 @@ def capture_menu_item(page, base, org, item_pattern, shot_path, privacy=False,
 SS_BUTTON = re.compile(r"log ?in to simple (higher ed|syllabus) directly|click here to log ?in", re.I)
 
 
+def _find_view(target, m):
+    """The View button on the card whose text mentions the course (e.g. 'ADN 207')."""
+    return target.locator(
+        f"xpath=//*[contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), '{m.group(1).upper()}')]"
+        f"[contains(., '{m.group(2)}')][not(.//*[contains(., '{m.group(2)}')])]"
+        f"/ancestor::*[.//button[normalize-space()='View'] or .//a[normalize-space()='View']][1]"
+        f"//*[self::button or self::a][normalize-space()='View']")
+
+
 def open_course_in_dashboard(target, base, course_code, term):
-    """On the Simple Syllabus dashboard: search for the course, choose its semester, click View on its card.
-    Returns what was done; the caller reads the page text afterwards."""
-    done = {"searched": False, "semester": False, "clicked_view": False}
+    """On the Simple Syllabus dashboard: search for the course, expand the lists, click View on its card.
+    The course's own semester is often not in Simple Syllabus (it shows the newest ones), so any semester of the
+    same course is acceptable; the newest match wins."""
+    done = {"searched": False, "expanded": False, "semester": False, "clicked_view": False}
     m = re.match(r"([A-Za-z]{2,5})[_\- ]?(\d{3}[A-Za-z]?)", course_code or "")
-    pat = re.compile(rf"{m.group(1)}[\s_\-]*{m.group(2)}", re.I) if m else None
     q = f"{m.group(1)} {m.group(2)}" if m else None
     try:
-        if term:  # the dashboard defaults to the newest semester; ours may be older
-            for opener in (target.get_by_label(re.compile("semester", re.I)), target.get_by_role("combobox", name=re.compile("semester", re.I)),
-                           target.get_by_text(re.compile(r"^\s*Semester\s*$", re.I))):
-                if opener.count() > 0:
-                    opener.first.click(timeout=4000)
-                    target.wait_for_timeout(800)
-                    for opt in (target.get_by_role("option", name=re.compile(term, re.I)), target.get_by_role("checkbox", name=re.compile(term, re.I)),
-                                target.get_by_text(re.compile(rf"^\s*{re.escape(term)}\s*$", re.I))):
-                        if opt.count() > 0:
-                            opt.first.click(timeout=4000)
-                            done["semester"] = True
-                            break
-                    target.keyboard.press("Escape")
-                    break
-        box = target.get_by_placeholder(re.compile("looking for", re.I))
+        box = target.get_by_placeholder(re.compile("looking for|search", re.I))
         if q and box.count() > 0:
             box.first.fill(q)
             box.first.press("Enter")
             done["searched"] = True
-            target.wait_for_timeout(3000)
-        if pat is not None:
-            card_view = target.locator(
-                f"xpath=//*[contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), '{m.group(1).upper()}')]"
-                f"[contains(., '{m.group(2)}')][not(.//*[contains(., '{m.group(2)}')])]"
-                f"/ancestor::*[.//button[normalize-space()='View'] or .//a[normalize-space()='View']][1]"
-                f"//*[self::button or self::a][normalize-space()='View']")
-            if card_view.count() > 0:
-                before = set(target.context.pages)
-                card_view.first.click(timeout=6000)
-                done["clicked_view"] = True
-                new_page = None
-                for _ in range(20):
-                    target.wait_for_timeout(500)
-                    new = [p for p in target.context.pages if p not in before]
-                    if new:
-                        new_page = new[0]
+            target.wait_for_timeout(3500)
+        if m is None:
+            return done
+        for attempt in range(3):
+            cv = _find_view(target, m)
+            if cv.count() > 0:
+                break
+            if attempt == 0:      # the lists (To Do / Awaiting Approval / Completed) may be collapsed
+                for head in ("Completed", "Awaiting Approval", "To Do"):
+                    h = target.get_by_text(re.compile(rf"^\s*{head}\s*\d*\s*$", re.I))
+                    if h.count() > 0:
+                        try:
+                            h.first.click(timeout=2500)
+                            done["expanded"] = True
+                        except Exception:
+                            pass
+                target.wait_for_timeout(1500)
+            elif term:            # last resort: ask for the course's own semester
+                for opener in (target.get_by_label(re.compile("semester", re.I)), target.get_by_text(re.compile(r"^\s*Semester\s*$", re.I))):
+                    if opener.count() > 0:
+                        try:
+                            opener.first.click(timeout=3000)
+                            target.wait_for_timeout(800)
+                            opt = target.get_by_text(re.compile(rf"^\s*{re.escape(term)}\s*$", re.I))
+                            if opt.count() > 0:
+                                opt.first.click(timeout=3000)
+                                done["semester"] = True
+                            target.keyboard.press("Escape")
+                        except Exception:
+                            pass
                         break
-                done["page"] = new_page
+                target.wait_for_timeout(2000)
+        cv = _find_view(target, m)
+        done["matches"] = cv.count()
+        if cv.count() > 0:
+            before = set(target.context.pages)
+            cv.first.click(timeout=6000)
+            done["clicked_view"] = True
+            for _ in range(20):
+                target.wait_for_timeout(500)
+                new = [p for p in target.context.pages if p not in before]
+                if new:
+                    done["page"] = new[0]
+                    break
+        else:   # leave a short, non-personal excerpt of the course list so the next fix can see what is there
+            done["page_excerpt"] = re.sub(r"\s+", " ", " ".join(f["text"] for f in deep_text(target, base)))[:600]
     except Exception as e:
         done["error"] = str(e)[:200]
     return done
@@ -743,8 +765,14 @@ def panorama_report(page, base, link, shot_path):
     out = open_and_capture(page, link, shot_path, base)
     text = " ".join(f["text"] for f in out.get("frames", []) if f.get("external")) or \
         " ".join(f["text"] for f in out.get("frames", []))
-    metrics = {"percent": [int(x) for x in re.findall(r"(\d{1,3})\s*%", text)][:12],
-               "counts": {}}
+    def grab(pat):
+        m = re.search(pat, text, re.I)
+        return int(m.group(1)) if m else None
+    metrics = {"percent": [int(x) for x in re.findall(r"(\d{1,3})\s*%", text)][:12], "counts": {},
+               "score": grab(r"Overall Accessibility Score\s*(\d{1,3})\s*%"),
+               "files_processed": grab(r"Total Files Processed\s*(\d+)"),
+               "files_remediated": grab(r"Total Files Remediated\s*(\d+)"),
+               "nothing_yet": bool(re.search(r"nothing to report yet", text, re.I))}
     for n, word in re.findall(r"(\d+)\s+(issues?|errors?|warnings?|files?|documents?|images?|videos?|pages?)\b", text, re.I):
         metrics["counts"][word.lower()] = metrics["counts"].get(word.lower(), 0) + int(n)
     out["metrics"] = metrics
@@ -958,6 +986,10 @@ def collect_one(d2l, page, base, org, outdir, how, login=None, shots=True, full=
             try:
                 page.goto(base + path.format(org=org), wait_until="domcontentloaded", timeout=30000)
                 settle(page)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=8000)
+                except Exception:
+                    pass
                 page.screenshot(path=str(outdir / "screenshots" / f"{label}.png"), full_page=True)
             except Exception as e:  # screenshots are best-effort
                 data.setdefault("screenshot_errors", {})[label] = str(e)
@@ -1006,6 +1038,12 @@ def run_collect(course, base_hint=None, out="out", profile="session", headless=F
             except Exception as e:
                 print("Could not list your courses:", e)
             if pick is not None and my_courses:
+                from datetime import date, timedelta
+                cutoff = (date.today() - timedelta(days=400)).isoformat()
+                for cx in my_courses:      # peek at the content of recent hybrid/online candidates (cheap API call)
+                    if cx["mode"] and (cx["active"] or cx["end"] >= cutoff):
+                        toc = d2l.get(d2l.le(f"/{cx['id']}/content/toc"), "probe") or {}
+                        cx["modules"] = len(toc.get("Modules") or [])
                 choice = pick(my_courses) or {}
                 extra_orgs = [i for i in choice.get("include", []) if i != org]
         path, data = collect_one(d2l, page, base, org, Path(out) / org, how, login, shots, full=True)
