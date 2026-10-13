@@ -46,7 +46,7 @@ class Ctx:
         def _syllabus_like(t):
             hits = sum(bool(SEARCH(p, t)) for p in (r"objectives?|outcomes", r"office hours", r"required (text|materials)|textbook",
                                                       r"grading|grade scale", r"schedule|calendar", r"policy|policies"))
-            return len(t) > 1500 and hits >= 3
+            return len(t) > 600 and hits >= 3
         direct = [f for f in (d.get("syllabus_direct") or {}).get("frames", [])
                   if _syllabus_like(f.get("text", "")) and not SEARCH(ERR, f.get("text", ""))]
         self.syl_direct = bool(direct)
