@@ -736,6 +736,22 @@ def follow_simple_syllabus(page, base, org, shot_path, login, course_code="", te
     return out
 
 
+def panorama_report(page, base, link, shot_path):
+    """Open the college's ADA tool (Panorama) and keep its course accessibility figures. A course-level report
+    (file names and scores), not student data."""
+    out = open_and_capture(page, link, shot_path, base)
+    text = " ".join(f["text"] for f in out.get("frames", []) if f.get("external")) or \
+        " ".join(f["text"] for f in out.get("frames", []))
+    metrics = {"percent": [int(x) for x in re.findall(r"(\d{1,3})\s*%", text)][:12],
+               "counts": {}}
+    for n, word in re.findall(r"(\d+)\s+(issues?|errors?|warnings?|files?|documents?|images?|videos?|pages?)\b", text, re.I):
+        metrics["counts"][word.lower()] = metrics["counts"].get(word.lower(), 0) + int(n)
+    out["metrics"] = metrics
+    out["text_excerpt"] = re.sub(r"\s+", " ", text)[:1500]
+    out.pop("frames", None)           # keep the extract, not the whole page
+    return out
+
+
 def syllabus_and_qwickly(page, base, org, shots_dir, login=None, follow_direct=True, course_code="", term=""):
     print("Scanning the course menus...")
     nav = nav_scan(page, base, org)
@@ -750,6 +766,10 @@ def syllabus_and_qwickly(page, base, org, shots_dir, login=None, follow_direct=T
                              for f in res["syllabus_tool"].get("frames", []) if f.get("external")):
         print("The Syllabus tool shows an account error; clicking its direct-login button...")
         res["syllabus_direct"] = follow_simple_syllabus(page, base, org, shots_dir / "syllabus_direct.png", login, course_code, term)
+    pan = find_link(nav, r"panorama")
+    if pan and pan.get("href") and not pan["href"].startswith("javascript"):
+        print("Reading the Panorama (ADA) accessibility report...")
+        res["panorama"] = panorama_report(page, base, pan, shots_dir / "panorama.png")
     qw = find_link(nav, r"qwickly") or find_link(nav, r"attendance")
     print("Opening Qwickly attendance..." if qw else "No Qwickly link found in the menus.")
     if qw and qw.get("href") and not qw["href"].startswith("javascript"):
@@ -765,6 +785,98 @@ def syllabus_and_qwickly(page, base, org, shots_dir, login=None, follow_direct=T
         print("Qwickly has no web address, so clicking it from the menu...")
         res["qwickly"] = capture_menu_item(page, base, org, r"qwickly", None, privacy=True)
     return res
+
+
+STUDENT_BTN = re.compile(r"view as student", re.I)
+BACK_BTN = re.compile(r"^\s*(return to|back to|exit).*|^\s*instructor\s*$|stop viewing", re.I)
+
+
+def _first(page, *locs):
+    for loc in locs:
+        try:
+            if loc.count() > 0:
+                return loc.first
+        except Exception:
+            pass
+    return None
+
+
+def _open_user_menu(page, who):
+    name = f"{who.get('FirstName', '')} {who.get('LastName', '')}".strip()
+    if not name:
+        return False
+    btn = _first(page, page.get_by_role("button", name=re.compile(re.escape(name), re.I)), page.get_by_text(name))
+    if btn is None:
+        return False
+    try:
+        btn.click(timeout=4000)
+        page.wait_for_timeout(1000)
+        return True
+    except Exception:
+        return False
+
+
+def _is_instructor_view(page):
+    return any(re.fullmatch(r"edit course|classlist", l["text"].strip(), re.I) for l in page_links(page))
+
+
+def student_view_check(page, base, org, who, grade_names, shots_dir):
+    """See the course the way students do: switch role to Student, read the navbar and the grades page, ALWAYS switch back.
+    Only the instructor's own (empty) student view is read; no student data is involved."""
+    out = {"attempted": True, "switched": False, "switched_back": False}
+    try:
+        page.goto(f"{base}/d2l/home/{org}", wait_until="domcontentloaded", timeout=30000)
+        settle(page, 2)
+        if not _is_instructor_view(page):
+            out["note"] = "Not in the instructor view at the start; skipped."
+            return out
+        _open_user_menu(page, who)
+        btn = _first(page, page.get_by_role("button", name=STUDENT_BTN), page.get_by_role("menuitem", name=STUDENT_BTN),
+                     page.get_by_role("link", name=STUDENT_BTN), page.get_by_text(STUDENT_BTN))
+        if btn is None:
+            out["note"] = "The 'View as Student' control was not found."
+            return out
+        btn.click(timeout=6000)
+        settle(page, 4)
+        out["switched"] = not _is_instructor_view(page)
+        if out["switched"]:
+            links = page_links(page)
+            names = sorted({l["text"].strip() for l in links if l["text"].strip()})
+            out["student_nav"] = names[:60]
+            out["syllabus_link"] = any(re.fullmatch(r"syllabus", n, re.I) for n in names)
+            out["attendance_link"] = any(re.search(r"qwickly|attendance", n, re.I) for n in names)
+            page.goto(f"{base}/d2l/lms/grades/my_grades/main.d2l?ou={org}", wait_until="domcontentloaded", timeout=30000)
+            settle(page, 3)
+            text = " ".join(f["text"] for f in deep_text(page, base))
+            out["final_grade_shown"] = bool(re.search(r"final (calculated|adjusted) grade", text, re.I))
+            names_g = [g for g in grade_names if g]
+            out["items_total"] = len(names_g)
+            out["items_visible"] = sum(1 for g in names_g if g in text)
+            page.screenshot(path=str(shots_dir / "student_grades.png"), full_page=True)
+    except Exception as e:
+        out["error"] = str(e)[:200]
+    finally:   # never leave the account in the student view
+        try:
+            if out["switched"] or not _is_instructor_view(page):
+                page.goto(f"{base}/d2l/home/{org}", wait_until="domcontentloaded", timeout=30000)
+                settle(page, 2)
+                _open_user_menu(page, who)
+                back = _first(page, page.get_by_role("button", name=BACK_BTN), page.get_by_role("menuitem", name=BACK_BTN),
+                              page.get_by_role("link", name=BACK_BTN), page.get_by_text(BACK_BTN))
+                if back is not None:
+                    back.click(timeout=6000)
+                    settle(page, 3)
+                out["switched_back"] = _is_instructor_view(page)
+                if not out["switched_back"]:      # last resort: end this browser session so the role resets
+                    page.goto(f"{base}/d2l/logout", wait_until="domcontentloaded", timeout=30000)
+                    out["logged_out_to_reset_role"] = True
+                    print("WARNING: could not switch back from the student view, so the tool logged out of D2L to reset it. "
+                          "Your normal browser sessions are not affected.")
+            else:
+                out["switched_back"] = True
+        except Exception as e:
+            out["restore_error"] = str(e)[:200]
+    return out
 
 
 def term_name(code):
@@ -835,6 +947,8 @@ def collect_one(d2l, page, base, org, outdir, how, login=None, shots=True, full=
         data["nav"], data["syllabus_tool"], data["qwickly"] = extra["nav"], extra["syllabus_tool"], extra["qwickly"]
         if extra.get("syllabus_direct"):
             data["syllabus_direct"] = extra["syllabus_direct"]
+        if extra.get("panorama"):
+            data["panorama"] = extra["panorama"]
     except Exception as e:
         data["qwickly"] = {"found": False, "error": str(e)}
     if shots and full:
@@ -856,7 +970,7 @@ def collect_one(d2l, page, base, org, outdir, how, login=None, shots=True, full=
 
 def run_collect(course, base_hint=None, out="out", profile="session", headless=False,
                 browser_path=None, shots=True, login=None, channel=None, no_wait=False,
-                extra_orgs=(), pick=None):
+                extra_orgs=(), pick=None, student_view=True):
     """Log in once, collect the main course in full, then (lighter) each extra course.
     `pick(courses) -> {"include": [ids], "meets": {id: n}}` lets the caller choose which courses to include."""
     m = re.match(r"(https?://[^/]+)/d2l/home/(\d+)", course)
@@ -900,6 +1014,10 @@ def run_collect(course, base_hint=None, out="out", profile="session", headless=F
                 extras.append((xo, xd))
             except Exception as e:
                 print(f"Skipping course {xo}: {e}")
+        if student_view and not no_wait and not data.get("fatal"):
+            print("Checking what students see (switching to the student view, then back)...")
+            gnames = [g.get("Name") for g in (data.get("grade_items") or []) if isinstance(g, dict) and g.get("GradeType") != "Category"]
+            data["student_view"] = student_view_check(page, base, org, data.get("whoami") or {}, gnames, Path(out) / org / "screenshots")
         try:
             ctx.close()
         except Exception:

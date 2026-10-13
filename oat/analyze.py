@@ -520,6 +520,35 @@ def analyze(d):
     review("9.05", "Current/accurate grades need a look at the gradebook.")
     review("9.07", "Overall/current grade visibility: check Grades > Settings or the student view.")
 
+    # ---------- Panorama (ADA tool) and the student view ----------
+    pan = d.get("panorama") or {}
+    if pan.get("found") and (pan.get("metrics") or pan.get("text_excerpt")):
+        m = pan.get("metrics") or {}
+        review("8.05", f"The college's Panorama (ADA) report was read (percentages {m.get('percent')}, counts {m.get('counts')}). "
+                       f"See screenshots/panorama.png and interpret it for Section 8. Excerpt: {pan.get('text_excerpt', '')[:260]}")
+        if "8.05" in S:
+            S["8.05"]["note"] += f" | Panorama figures: {m.get('percent')} / {m.get('counts')}"
+    sv = d.get("student_view") or {}
+    if sv.get("switched"):
+        REVIEW[:] = [r for r in REVIEW if r["id"] not in ("9.06", "9.07", "9.02")]
+        if sv.get("final_grade_shown") is not None:
+            put("9.07", "1" if sv["final_grade_shown"] else "X",
+                "auto (student view): the final grade " + ("is shown" if sv["final_grade_shown"] else "is NOT shown") + " on the student grades page")
+        if sv.get("items_total"):
+            f = sv["items_visible"] / sv["items_total"]
+            put("9.06", grade_fraction(f, 0.9, 0.01), f"auto (student view): {sv['items_visible']} of {sv['items_total']} grade items are visible to students")
+        part = [g for g in c.grade_names if re.search(r"participation|attendance", g, re.I)]
+        if sv.get("attendance_link") or part:
+            put("9.02", "1", "auto (student view): " + ("students have the Qwickly attendance link" if sv.get("attendance_link") else "") +
+                ("; " if sv.get("attendance_link") and part else "") + (f"gradebook has '{part[0]}'" if part else "") +
+                " (the tool cannot see students' own attendance records)")
+        else:
+            review("9.02", "Participation visibility: no attendance link or participation grade item was visible to students.")
+        if sv.get("syllabus_link") is False:
+            review("1.01", "The Syllabus link was NOT visible in the student view.")
+    elif sv.get("attempted"):
+        review("9.07", "The student-view check could not run (" + (sv.get("note") or sv.get("error") or "unknown") + "); check Grades > Settings or the student view by hand.")
+
     # ---------- header ----------
     course = d.get("course") or {}
     staff_name = f"{who.get('LastName', '')}, {who.get('FirstName', '')}".strip(", ")

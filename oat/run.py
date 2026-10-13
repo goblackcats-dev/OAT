@@ -236,6 +236,7 @@ def main():
     ap.add_argument("--out", default="OAT_output")
     ap.add_argument("--headless", action="store_true")
     ap.add_argument("--browser-path")
+    ap.add_argument("--no-student-view", action="store_true", help="skip the check that switches to the student view")
     ap.add_argument("--courses", metavar="IDS", help="comma-separated D2L ids of your OTHER online/hybrid/HyFlex courses")
     ap.add_argument("--pick-courses", action="store_true", help="choose your other courses again")
     ap.add_argument("--schedule", metavar="XLSX", help="the OAT Assessment Schedule spreadsheet (fills page 1; remembered)")
@@ -300,7 +301,8 @@ def main():
         try:
             path, data, how, extras = run_collect(course, out=a.out + "/data", profile=str(Path.home() / ".oat_session"),
                                                   headless=a.headless, browser_path=a.browser_path, login=login,
-                                                  channel=channel, pick=make_picker(a, base, m.group(2)))
+                                                  channel=channel, pick=make_picker(a, base, m.group(2)),
+                                                  student_view=not a.no_student_view)
             break
         except Exception as e:
             if "Executable doesn't exist" in str(e) or "not found" in str(e).lower() or "channel" in str(e).lower():
