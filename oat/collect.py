@@ -129,11 +129,10 @@ def diagnose(page, base):
             print(f"  network check: {h} NOT reachable from this computer ({e})")
 
 
-def try_auto_login(d2l, login):
-    """Fill the standard D2L login form. Returns True if the session became logged in."""
-    page = d2l.page
+def fill_login_form(page, login):
+    """Fill and submit a username/password form on ANY page (Microsoft ADFS, plain D2L, Simple Syllabus SSO).
+    Returns True if a form was found and submitted."""
     try:
-        # Works for the Microsoft ADFS page (#userNameInput / #passwordInput) and the plain D2L form.
         user = page.locator("#userNameInput, input[name='UserName'], input[name='userName'], "
                             "input#userName, input[type='email'], input[name='loginfmt']").first
         pwd = page.locator("#passwordInput, input[type='password']").first
@@ -146,7 +145,14 @@ def try_auto_login(d2l, login):
             submit.click()
         else:
             pwd.press("Enter")
+        return True
     except Exception:
+        return False
+
+
+def try_auto_login(d2l, login):
+    """Fill the standard login form. Returns True if the session became logged in."""
+    if not fill_login_form(d2l.page, login):
         return False
     end = time.time() + 25
     while time.time() < end:
@@ -501,7 +507,57 @@ def capture_menu_item(page, base, org, item_pattern, shot_path,
     return out
 
 
-def syllabus_and_qwickly(page, base, org, shots_dir):
+SS_BUTTON = re.compile(r"log ?in to simple (higher ed|syllabus) directly|click here to log ?in", re.I)
+
+
+def follow_simple_syllabus(page, base, org, shot_path, login):
+    """The Syllabus tool shows 'could not locate a matching account' with a button that logs in to
+    Simple Higher Ed directly. Click it, sign in if asked, and capture what opens."""
+    out = {"found": False}
+    try:
+        btn = None
+        for fr in page.frames:
+            if _host(fr.url) and _host(fr.url) != _host(base):
+                for loc in (fr.get_by_role("button", name=SS_BUTTON), fr.get_by_role("link", name=SS_BUTTON),
+                            fr.get_by_text(SS_BUTTON)):
+                    if loc.count() > 0:
+                        btn = loc.first
+                        break
+            if btn is not None:
+                break
+        if btn is None:
+            return out
+        out["found"] = True
+        before, start_url = set(page.context.pages), page.url
+        btn.click(timeout=8000)
+        target, end = page, time.time() + 20
+        while time.time() < end:
+            new = [p for p in page.context.pages if p not in before]
+            if new:
+                target = new[0]
+                break
+            time.sleep(0.5)
+        settle(target, 3)
+        if login and target.locator("input[type='password']").count() > 0:
+            out["signed_in_with_saved_login"] = fill_login_form(target, login)
+            settle(target, 4)
+        end = time.time() + 40  # the Simple Syllabus app is a slow single-page app
+        while time.time() < end:
+            if sum(len(f["text"]) for f in deep_text(target, base)) > 800:
+                break
+            time.sleep(2)
+        target.screenshot(path=str(shot_path), full_page=True)
+        out["url"] = target.url
+        out["new_tab"] = target is not page
+        out["frames"] = deep_text(target, base)
+        if target is not page:
+            target.close()
+    except Exception as e:
+        out["error"] = str(e)
+    return out
+
+
+def syllabus_and_qwickly(page, base, org, shots_dir, login=None):
     print("Scanning the course menus...")
     nav = nav_scan(page, base, org)
     res = {"nav": nav, "syllabus_tool": {"found": False}, "qwickly": {"found": False}}
@@ -511,6 +567,10 @@ def syllabus_and_qwickly(page, base, org, shots_dir):
         res["syllabus_tool"] = open_and_capture(page, syl, shots_dir / "syllabus.png", base)
     if not any(f.get("external") for f in res["syllabus_tool"].get("frames", [])):
         res["syllabus_tool"] = capture_by_click(page, base, org, r"^syllabus$", shots_dir / "syllabus.png")
+    if any(re.search(r"could not locate a matching account|error has occurred", f.get("text", ""), re.I)
+           for f in res["syllabus_tool"].get("frames", []) if f.get("external")):
+        print("The Syllabus tool shows an account error; clicking its direct-login button...")
+        res["syllabus_direct"] = follow_simple_syllabus(page, base, org, shots_dir / "syllabus_direct.png", login)
     qw = find_link(nav, r"qwickly") or find_link(nav, r"attendance")
     print("Opening Qwickly attendance..." if qw else "No Qwickly link found in the menus.")
     if qw and qw.get("href") and not qw["href"].startswith("javascript"):
@@ -571,10 +631,12 @@ def run_collect(course, base_hint=None, out="out", profile="session", headless=F
         data["login_method"] = how
         data["whoami"] = logged_in(d2l)
         try:
-            extra = syllabus_and_qwickly(page, base, org, outdir / "screenshots")
+            extra = syllabus_and_qwickly(page, base, org, outdir / "screenshots", login)
             data["nav"], data["syllabus_tool"], data["qwickly"] = extra["nav"], extra["syllabus_tool"], extra["qwickly"]
             if extra.get("j1"):
                 data["j1"] = extra["j1"]
+            if extra.get("syllabus_direct"):
+                data["syllabus_direct"] = extra["syllabus_direct"]
         except Exception as e:
             data["qwickly"] = {"found": False, "error": str(e)}
         if shots:

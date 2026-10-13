@@ -43,7 +43,10 @@ class Ctx:
                       if f.get("external") or (f.get("frame") and "/d2l/" not in f["frame"])]
         self.syl_file = (d.get("syllabus_tool") or {}).get("source") == "file"
         self.syl_error = (not self.syl_file) and any(SEARCH(ERR, f.get("text", "")) for f in syl_frames)
-        self.syl_tool = " ".join(f.get("text", "") for f in syl_frames if not SEARCH(ERR, f.get("text", "")))
+        direct = [f for f in (d.get("syllabus_direct") or {}).get("frames", [])
+                  if len(f.get("text", "")) > 400 and not SEARCH(ERR, f.get("text", ""))]
+        self.syl_direct = bool(direct)
+        self.syl_tool = " ".join(f.get("text", "") for f in syl_frames + direct if not SEARCH(ERR, f.get("text", "")))
         self.syllabus = (" ".join(p["text"] for p in self.pages if SEARCH("syllabus", p["title"] + p["url"]))
                          + " " + self.syl_tool).strip()
         self.grade_names = [g.get("Name") or "" for g in self.grades if isinstance(g, dict)]
@@ -122,8 +125,9 @@ def analyze(d):
         or "Syllabus" in (d.get("qwickly") or {}).get("nav_links", []) \
         or (d.get("syllabus_tool") or {}).get("found")
     if c.syl_error:
-        review("1.01", "The Syllabus tab opens Simple Higher Ed, which showed the error 'could not locate a matching account' for your login. "
-                       "Check with the Teaching and Learning Center, and confirm that students can open the syllabus. Not scored automatically.")
+        review("1.01", "The Syllabus tab opens Simple Higher Ed, which showed the error 'could not locate a matching account' for your login" +
+               (" (the direct-login button did work; see screenshots/syllabus_direct.png, and confirm it shows YOUR course's syllabus)" if c.syl_direct else "") +
+               ". Check with the Teaching and Learning Center, and confirm that students can open the syllabus. Not scored automatically.")
     elif syl_pages or syl_topics or nav_syl:
         put("1.01", "1", "auto: syllabus found" + (" (Syllabus tool in the course navbar)" if nav_syl else ": " + (syl_pages or syl_topics)[0].get("title", "")))
     else:
