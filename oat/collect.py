@@ -452,17 +452,22 @@ def capture_by_click(page, base, org, name_pattern, shot_path):
 
 
 def syllabus_and_qwickly(page, base, org, shots_dir):
+    print("Scanning the course menus...")
     nav = nav_scan(page, base, org)
     res = {"nav": nav, "syllabus_tool": {"found": False}, "qwickly": {"found": False}}
     syl = find_link(nav, r"^syllabus$|/syllabus")
+    print("Reading the Syllabus tool (it can take up to 40 seconds to load)...")
     if syl and syl.get("href"):
         res["syllabus_tool"] = open_and_capture(page, syl, shots_dir / "syllabus.png", base)
     if not any(f.get("external") for f in res["syllabus_tool"].get("frames", [])):
         res["syllabus_tool"] = capture_by_click(page, base, org, r"^syllabus$", shots_dir / "syllabus.png")
     qw = find_link(nav, r"qwickly") or find_link(nav, r"attendance")
+    print("Opening Qwickly attendance..." if qw else "No Qwickly link found in the menus.")
     if qw and qw.get("href") and not qw["href"].startswith("javascript"):
         res["qwickly"] = open_and_capture(page, qw, shots_dir / "qwickly.png", base)
     j1 = find_link(nav, r"\bJ1\b")
+    if j1:
+        print("Opening J1 Grades & Attendance...")
     if j1 and j1.get("href") and not j1["href"].startswith("javascript"):
         res["j1"] = open_and_capture(page, j1, shots_dir / "j1.png", base)
     if not any(f.get("external") for f in res["qwickly"].get("frames", [])) and not res["qwickly"].get("found"):
@@ -502,6 +507,7 @@ def run_collect(course, base_hint=None, out="out", profile="session", headless=F
             except Exception:
                 pass
         import traceback
+        print("Reading the course (modules, quizzes, discussions, grades, files)...")
         try:
             data = collect(d2l, org)
         except Exception:
@@ -517,6 +523,7 @@ def run_collect(course, base_hint=None, out="out", profile="session", headless=F
         except Exception as e:
             data["qwickly"] = {"found": False, "error": str(e)}
         if shots:
+            print("Taking screenshots...")
             for label, path in SHOTS:
                 try:
                     page.goto(base + path.format(org=org), wait_until="domcontentloaded", timeout=30000)
