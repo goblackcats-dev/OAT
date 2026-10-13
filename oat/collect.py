@@ -616,7 +616,58 @@ def capture_menu_item(page, base, org, item_pattern, shot_path, privacy=False,
 SS_BUTTON = re.compile(r"log ?in to simple (higher ed|syllabus) directly|click here to log ?in", re.I)
 
 
-def follow_simple_syllabus(page, base, org, shot_path, login):
+def open_course_in_dashboard(target, base, course_code, term):
+    """On the Simple Syllabus dashboard: search for the course, choose its semester, click View on its card.
+    Returns what was done; the caller reads the page text afterwards."""
+    done = {"searched": False, "semester": False, "clicked_view": False}
+    m = re.match(r"([A-Za-z]{2,5})[_\- ]?(\d{3}[A-Za-z]?)", course_code or "")
+    pat = re.compile(rf"{m.group(1)}[\s_\-]*{m.group(2)}", re.I) if m else None
+    q = f"{m.group(1)} {m.group(2)}" if m else None
+    try:
+        if term:  # the dashboard defaults to the newest semester; ours may be older
+            for opener in (target.get_by_label(re.compile("semester", re.I)), target.get_by_role("combobox", name=re.compile("semester", re.I)),
+                           target.get_by_text(re.compile(r"^\s*Semester\s*$", re.I))):
+                if opener.count() > 0:
+                    opener.first.click(timeout=4000)
+                    target.wait_for_timeout(800)
+                    for opt in (target.get_by_role("option", name=re.compile(term, re.I)), target.get_by_role("checkbox", name=re.compile(term, re.I)),
+                                target.get_by_text(re.compile(rf"^\s*{re.escape(term)}\s*$", re.I))):
+                        if opt.count() > 0:
+                            opt.first.click(timeout=4000)
+                            done["semester"] = True
+                            break
+                    target.keyboard.press("Escape")
+                    break
+        box = target.get_by_placeholder(re.compile("looking for", re.I))
+        if q and box.count() > 0:
+            box.first.fill(q)
+            box.first.press("Enter")
+            done["searched"] = True
+            target.wait_for_timeout(3000)
+        if pat is not None:
+            card_view = target.locator(
+                f"xpath=//*[contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), '{m.group(1).upper()}')]"
+                f"[contains(., '{m.group(2)}')][not(.//*[contains(., '{m.group(2)}')])]"
+                f"/ancestor::*[.//button[normalize-space()='View'] or .//a[normalize-space()='View']][1]"
+                f"//*[self::button or self::a][normalize-space()='View']")
+            if card_view.count() > 0:
+                before = set(target.context.pages)
+                card_view.first.click(timeout=6000)
+                done["clicked_view"] = True
+                new_page = None
+                for _ in range(20):
+                    target.wait_for_timeout(500)
+                    new = [p for p in target.context.pages if p not in before]
+                    if new:
+                        new_page = new[0]
+                        break
+                done["page"] = new_page
+    except Exception as e:
+        done["error"] = str(e)[:200]
+    return done
+
+
+def follow_simple_syllabus(page, base, org, shot_path, login, course_code="", term=""):
     """The Syllabus tool shows 'could not locate a matching account' with a button that logs in to
     Simple Higher Ed directly. Click it, sign in if asked, and capture what opens."""
     out = {"found": False}
@@ -652,8 +703,30 @@ def follow_simple_syllabus(page, base, org, shot_path, login):
             if sum(len(f["text"]) for f in deep_text(target, base)) > 500:
                 break
             page.wait_for_timeout(2000)
+        try:
+            target.set_viewport_size({"width": 1280, "height": 900})   # popups open narrow (mobile layout)
+        except Exception:
+            pass
+        if "dashboard" in target.url.lower() or "simplesyllabus" in target.url.lower():
+            steps = open_course_in_dashboard(target, base, course_code, term)
+            newp = steps.pop("page", None)
+            out["dashboard_steps"] = steps
+            if newp is not None:                         # View opened the syllabus in another tab
+                settle(newp, 3)
+                try:
+                    newp.set_viewport_size({"width": 1280, "height": 900})
+                except Exception:
+                    pass
+                if target is not page:
+                    target.close()
+                target = newp
+            elif steps.get("clicked_view"):
+                settle(target, 4)
+            end = time.time() + 30
+            while time.time() < end and sum(len(f["text"]) for f in deep_text(target, base)) < 1500:
+                target.wait_for_timeout(2000)
         target.screenshot(path=str(shot_path), full_page=True)
-        out["url"] = target.url
+        out["url"] = target.url.split("?")[0]
         out["new_tab"] = target is not page
         out["frames"] = deep_text(target, base)
         if target is not page:
@@ -663,7 +736,7 @@ def follow_simple_syllabus(page, base, org, shot_path, login):
     return out
 
 
-def syllabus_and_qwickly(page, base, org, shots_dir, login=None, follow_direct=True):
+def syllabus_and_qwickly(page, base, org, shots_dir, login=None, follow_direct=True, course_code="", term=""):
     print("Scanning the course menus...")
     nav = nav_scan(page, base, org)
     res = {"nav": nav, "syllabus_tool": {"found": False}, "qwickly": {"found": False}}
@@ -676,7 +749,7 @@ def syllabus_and_qwickly(page, base, org, shots_dir, login=None, follow_direct=T
     if follow_direct and any(re.search(r"could not locate a matching account|error has occurred", f.get("text", ""), re.I)
                              for f in res["syllabus_tool"].get("frames", []) if f.get("external")):
         print("The Syllabus tool shows an account error; clicking its direct-login button...")
-        res["syllabus_direct"] = follow_simple_syllabus(page, base, org, shots_dir / "syllabus_direct.png", login)
+        res["syllabus_direct"] = follow_simple_syllabus(page, base, org, shots_dir / "syllabus_direct.png", login, course_code, term)
     qw = find_link(nav, r"qwickly") or find_link(nav, r"attendance")
     print("Opening Qwickly attendance..." if qw else "No Qwickly link found in the menus.")
     if qw and qw.get("href") and not qw["href"].startswith("javascript"):
@@ -757,7 +830,8 @@ def collect_one(d2l, page, base, org, outdir, how, login=None, shots=True, full=
     data["login_method"] = how
     data["whoami"] = logged_in(d2l)
     try:
-        extra = syllabus_and_qwickly(page, base, org, outdir / "screenshots", login, follow_direct=full)
+        code = ((data.get("course") or {}).get("Code")) or ""
+        extra = syllabus_and_qwickly(page, base, org, outdir / "screenshots", login, follow_direct=full, course_code=code, term=term_name(code))
         data["nav"], data["syllabus_tool"], data["qwickly"] = extra["nav"], extra["syllabus_tool"], extra["qwickly"]
         if extra.get("syllabus_direct"):
             data["syllabus_direct"] = extra["syllabus_direct"]
