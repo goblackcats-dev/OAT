@@ -51,8 +51,23 @@ class D2L:
         self.errors = {}
         self.versions = {}
 
+    def _eval(self, js, url):
+        """page.evaluate that survives mid-navigation errors ("execution context was destroyed")."""
+        last = None
+        for _ in range(4):
+            try:
+                return self.page.evaluate(js, url)
+            except Exception as e:  # navigation in progress: wait and retry
+                last = e
+                try:
+                    self.page.wait_for_load_state("load", timeout=15000)
+                except Exception:
+                    pass
+                time.sleep(1.5)
+        return {"status": 0, "body": None, "b64": None, "text": f"evaluate failed: {last}"}
+
     def get(self, path, key=None):
-        res = self.page.evaluate(FETCH_JS, self.base + path)
+        res = self._eval(FETCH_JS, self.base + path)
         if res["status"] != 200:
             self.errors[key or path] = {"status": res["status"], "detail": res["text"]}
             return None
@@ -73,8 +88,8 @@ class D2L:
         return out
 
     def get_bytes(self, path):
-        res = self.page.evaluate(BYTES_JS, path if path.startswith("http") else self.base + path)
-        return base64.b64decode(res["b64"]) if res["status"] == 200 else None
+        res = self._eval(BYTES_JS, path if path.startswith("http") else self.base + path)
+        return base64.b64decode(res["b64"]) if res.get("status") == 200 and res.get("b64") else None
 
     def load_versions(self):
         for p in self.get("/d2l/api/versions/", "versions") or []:
@@ -217,7 +232,11 @@ def collect(d2l, org):
                            "activity": topic.get("ActivityType"),
                            "description": (topic.get("Description") or {}).get("Text")})
     data["topics"] = topics
-    data["pages"] = fetch_pages(d2l, topics)
+    try:
+        data["pages"] = fetch_pages(d2l, topics)
+    except Exception as e:
+        data["pages"] = []
+        d2l.errors["pages"] = {"status": 0, "detail": f"{type(e).__name__}: {e}"}
 
     # Module descriptions/overviews live on the module objects themselves.
     data["modules"] = [{"path": list(t), "id": m.get("ModuleId"), "title": m.get("Title"),
@@ -309,10 +328,23 @@ def run_collect(course, base_hint=None, out="out", profile="session", headless=F
         if not no_wait:
             who, how = ensure_login(d2l, login)
             print("Logged in as:", (who or {}).get("FirstName"), (who or {}).get("LastName"))
-        data = collect(d2l, org)
+            try:  # let any post-login redirects finish before reading data
+                page.wait_for_load_state("networkidle", timeout=20000)
+                page.goto(f"{base}/d2l/home/{org}", wait_until="load", timeout=30000)
+            except Exception:
+                pass
+        import traceback
+        try:
+            data = collect(d2l, org)
+        except Exception:
+            data = {"orgUnitId": org, "fatal": traceback.format_exc(), "api_errors": dict(d2l.errors)}
+            print("Collection hit an error (partial data will still be saved):\n" + data["fatal"])
         data["login_method"] = how
         data["whoami"] = logged_in(d2l)
-        data["qwickly"] = qwickly(page, base, org, outdir / "screenshots")
+        try:
+            data["qwickly"] = qwickly(page, base, org, outdir / "screenshots")
+        except Exception as e:
+            data["qwickly"] = {"found": False, "error": str(e)}
         if shots:
             for label, path in SHOTS:
                 try:
@@ -320,7 +352,10 @@ def run_collect(course, base_hint=None, out="out", profile="session", headless=F
                     page.screenshot(path=str(outdir / "screenshots" / f"{label}.png"), full_page=True)
                 except Exception as e:  # screenshots are best-effort
                     data.setdefault("screenshot_errors", {})[label] = str(e)
-        ctx.close()
+        try:
+            ctx.close()
+        except Exception:
+            pass
     path = outdir / "course.json"
     path.write_text(json.dumps(data, indent=2, default=str))
     print(f"Wrote {path}")
