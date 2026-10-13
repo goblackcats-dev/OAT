@@ -310,17 +310,47 @@ def settle(page, seconds=4):
     time.sleep(seconds)
 
 
-def deep_text(page):
-    """Visible text of the page and its iframes, including web-component (shadow DOM) content."""
+def _host(url):
+    from urllib.parse import urlparse
+    try:
+        return urlparse(url).hostname
+    except Exception:
+        return None
+
+
+def deep_text(page, base=None):
+    """Visible text of the page and its iframes, including web-component (shadow DOM) content.
+    Each part is flagged `external` when it comes from a different website than D2L itself
+    (LTI tools such as an external syllabus or attendance tool load that way)."""
     parts = []
+    host = _host(base or page.url)
     for fr in page.frames:
         try:
             t = fr.evaluate(DEEP_TEXT_JS)
             if t and len(t) > 20:
-                parts.append({"frame": fr.url, "text": t[:20000]})
+                parts.append({"frame": fr.url, "external": bool(_host(fr.url) and _host(fr.url) != host),
+                              "text": t[:30000]})
         except Exception:
             pass
     return parts
+
+
+def wait_external(page, base, timeout=40):
+    """LTI tools load slowly in a frame from another website. Wait until one has real content."""
+    host, end = _host(base), time.time() + timeout
+    while time.time() < end:
+        for fr in page.frames:
+            h = _host(fr.url)
+            if fr.url.startswith("http") and h and h != host:
+                try:
+                    t = fr.evaluate(DEEP_TEXT_JS)
+                    if t and len(t) > 300:
+                        time.sleep(2)
+                        return True
+                except Exception:
+                    pass
+        time.sleep(2)
+    return False
 
 
 def page_links(page):
@@ -364,14 +394,15 @@ def find_link(nav, pattern):
     return None
 
 
-def open_and_capture(page, link, shot_path):
+def open_and_capture(page, link, shot_path, base):
     out = {"found": True, "link_text": link["text"], "link_href": link["href"]}
     try:
         page.goto(link["href"], wait_until="domcontentloaded", timeout=40000)
         settle(page)
+        out["external_loaded"] = wait_external(page, base)
         page.screenshot(path=str(shot_path), full_page=True)
         out["url"] = page.url
-        out["frames"] = deep_text(page)
+        out["frames"] = deep_text(page, base)
     except Exception as e:
         out["error"] = str(e)
     return out
@@ -389,9 +420,10 @@ def capture_by_click(page, base, org, name_pattern, shot_path):
         out.update(found=True, link_text=loc.inner_text().strip())
         loc.click(timeout=8000)
         settle(page)
+        out["external_loaded"] = wait_external(page, base)
         page.screenshot(path=str(shot_path), full_page=True)
         out["url"] = page.url
-        out["frames"] = deep_text(page)
+        out["frames"] = deep_text(page, base)
     except Exception as e:
         out["error"] = str(e)
     return out
@@ -402,13 +434,13 @@ def syllabus_and_qwickly(page, base, org, shots_dir):
     res = {"nav": nav, "syllabus_tool": {"found": False}, "qwickly": {"found": False}}
     syl = find_link(nav, r"^syllabus$|/syllabus")
     if syl and syl.get("href"):
-        res["syllabus_tool"] = open_and_capture(page, syl, shots_dir / "syllabus.png")
-    if not res["syllabus_tool"].get("frames"):
+        res["syllabus_tool"] = open_and_capture(page, syl, shots_dir / "syllabus.png", base)
+    if not any(f.get("external") for f in res["syllabus_tool"].get("frames", [])):
         res["syllabus_tool"] = capture_by_click(page, base, org, r"^syllabus$", shots_dir / "syllabus.png")
     qw = find_link(nav, r"qwickly|attendance")
     if qw and qw.get("href"):
-        res["qwickly"] = open_and_capture(page, qw, shots_dir / "qwickly.png")
-    if not res["qwickly"].get("frames"):
+        res["qwickly"] = open_and_capture(page, qw, shots_dir / "qwickly.png", base)
+    if not any(f.get("external") for f in res["qwickly"].get("frames", [])) and not res["qwickly"].get("found"):
         res["qwickly"] = capture_by_click(page, base, org, r"qwickly|attendance", shots_dir / "qwickly.png")
     return res
 

@@ -37,7 +37,9 @@ class Ctx:
         self.forum_topics = [t for f in self.forums for t in (f.get("Topics") or [])]
         self.grades = d.get("grade_items") or []
         self.top_modules = [m for m in self.modules if len(m["path"]) == 1]
-        self.syl_tool = " ".join(f.get("text", "") for f in (d.get("syllabus_tool") or {}).get("frames", []))
+        # Only text from the tool's own frame counts. D2L's own page chrome (menus) is not syllabus text.
+        self.syl_tool = " ".join(f.get("text", "") for f in (d.get("syllabus_tool") or {}).get("frames", [])
+                                 if f.get("external") or (f.get("frame") and "/d2l/" not in f["frame"]))
         self.syllabus = (" ".join(p["text"] for p in self.pages if SEARCH("syllabus", p["title"] + p["url"]))
                          + " " + self.syl_tool).strip()
         self.grade_names = [g.get("Name") or "" for g in self.grades if isinstance(g, dict)]
@@ -97,7 +99,7 @@ def analyze(d):
     st = c.syllabus or c.corpus
     lbl = "syllabus" if c.syllabus else "course text"
     if not c.syllabus:
-        review("1.02-1.05", "The Syllabus tool's text could not be read, so these were checked against other course text only. Check the Syllabus tab by hand.")
+        review("1.02-1.05", "The Syllabus is an external tool whose text could not be read, so these were checked against other course text only. Check the Syllabus tab by hand (objectives, materials, textbook, contact info, office hours).")
     kw("1.02", r"(learning )?(objectives?|outcomes?)", st, lbl)
     kw("1.03", r"required (materials|text|resources)|materials|textbook|supplies", st, lbl)
     kw("1.04", r"\bISBN\b|\bedition\b", st, lbl)
@@ -130,7 +132,9 @@ def analyze(d):
     review("1.23", "Verbal confirmation: the instructor must state copyright clearance (see review report).")
 
     # ---------- Section 2 ----------
-    kw("2.01", r"integrity advocate|proctor|respondus|lockdown|technology (requirements|preparedness)|technical requirements")
+    navtxt = " ".join((l.get("text") or "") for l in (d.get("nav") or {}).get("links", []))
+    kw("2.01", r"integrity advocate|proctor|verity|respondus|lockdown|technology (requirements|preparedness)|technical requirements",
+       c.corpus + " " + navtxt)
     kw("2.02", r"orientation")
     kw("2.03", r"technology skills|technical skills|readiness|self-assessment")
     kw("2.04", r"learning styles?")
@@ -312,8 +316,7 @@ def analyze(d):
             "auto: Qwickly opened (see screenshots/qwickly.png); confirm sessions are taken on a regular schedule")
         review("9.01", "Confirm attendance is taken regularly (Qwickly screenshot attached).")
     else:
-        review("9.01", "Qwickly could not be opened automatically; check attendance records by hand." +
-               (" The course navbar links were scanned: " + ", ".join(sorted({(l.get('text') or '')[:20] for l in (d.get('nav') or {}).get('links', []) if re.search('qwickly|attendance', l.get('text') or '', re.I)})) if d.get("nav") else ""))
+        review("9.01", "No Qwickly/attendance link exists in this course's navbar, so it could not be opened automatically. Check attendance records by hand, or tell me where you open Qwickly from.")
     review("9.02", "Participation visible to students: check the student view of Qwickly / gradebook.")
     gi = [g for g in c.grades if isinstance(g, dict)]
     if gi:
