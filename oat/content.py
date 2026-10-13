@@ -14,6 +14,7 @@ class _P(HTMLParser):
         self.links, self.generic_links, self.headings = 0, 0, 0
         self.red, self.blink, self.fonts, self.tables = 0, 0, set(), 0
         self._a, self._skip = None, 0
+        self.hrefs = []
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
@@ -26,6 +27,8 @@ class _P(HTMLParser):
             elif not (a["alt"] or "").strip():
                 self.imgs_empty_alt += 1
         if tag == "a" and a.get("href"):
+            if a["href"].startswith("http"):
+                self.hrefs.append(a["href"])
             self.links += 1
             self._a = []
         if re.fullmatch(r"h[1-6]", tag):
@@ -68,7 +71,7 @@ def html_info(html):
                   "images_empty_alt": p.imgs_empty_alt, "links": p.links,
                   "generic_link_text": p.generic_links, "headings": p.headings,
                   "red_text": p.red, "blink": p.blink, "tables": p.tables,
-                  "fonts": sorted(p.fonts)}
+                  "fonts": sorted(p.fonts), "hyperlinks": p.hrefs[:60]}
 
 
 def pdf_info(data):
@@ -79,7 +82,16 @@ def pdf_info(data):
         root = r.trailer["/Root"]
         tagged = bool(root.get("/MarkInfo", {}).get("/Marked")) if "/MarkInfo" in root else False
         has_lang = "/Lang" in root
-        return re.sub(r"\s+", " ", text).strip(), {"pages": len(r.pages), "text_chars": len(text),
+        links = []
+        for pg in r.pages[:40]:
+            for an in (pg.get("/Annots") or []):
+                try:
+                    uri = an.get_object().get("/A", {}).get("/URI")
+                    if uri and str(uri).startswith("http"):
+                        links.append(str(uri))
+                except Exception:
+                    pass
+        return re.sub(r"\s+", " ", text).strip(), {"hyperlinks": links[:60], "pages": len(r.pages), "text_chars": len(text),
                                                    "tagged": tagged, "has_language": has_lang,
                                                    "looks_scanned": len(text.strip()) < 50 * max(1, len(r.pages))}
     except Exception as e:
@@ -91,7 +103,12 @@ def docx_info(data):
         z = zipfile.ZipFile(io.BytesIO(data))
         xml = z.read("word/document.xml").decode("utf8", "ignore")
         text = re.sub(r"<[^>]+>", " ", xml.replace("</w:p>", "\n"))
-        return re.sub(r"\s+", " ", text).strip(), {"images": len(re.findall(r"<w:drawing", xml)),
+        try:
+            rels = z.read("word/_rels/document.xml.rels").decode("utf8", "ignore")
+        except KeyError:
+            rels = ""
+        links = re.findall(r'Target="(https?://[^"]+)"', rels)
+        return re.sub(r"\s+", " ", text).strip(), {"hyperlinks": links[:60], "images": len(re.findall(r"<w:drawing", xml)),
                                                    "images_with_alt": len(re.findall(r'descr="[^"]+"', xml)),
                                                    "headings": len(re.findall(r'w:pStyle w:val="Heading', xml))}
     except Exception as e:
@@ -102,13 +119,18 @@ def pptx_info(data):
     try:
         z = zipfile.ZipFile(io.BytesIO(data))
         slides = sorted(n for n in z.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", n))
-        text, pics, alt = [], 0, 0
+        text, pics, alt, links = [], 0, 0, []
+        for n in z.namelist():
+            if re.fullmatch(r"ppt/slides/_rels/slide\d+\.xml\.rels", n):
+                links += re.findall(r'Target="(https?://[^"]+)"[^>]*TargetMode="External"|TargetMode="External"[^>]*Target="(https?://[^"]+)"',
+                                    z.read(n).decode("utf8", "ignore"))
+        links = [a or b for a, b in links]
         for n in slides:
             xml = z.read(n).decode("utf8", "ignore")
             text += re.findall(r"<a:t>([^<]*)</a:t>", xml)
             pics += len(re.findall(r"<p:pic>", xml))
             alt += len(re.findall(r'<p:cNvPr[^>]*\bdescr="[^"]+"', xml))
-        return " ".join(text), {"slides": len(slides), "images": pics, "images_with_alt": alt}
+        return " ".join(text), {"slides": len(slides), "images": pics, "images_with_alt": alt, "hyperlinks": links[:60]}
     except Exception as e:
         return "", {"error": str(e)}
 

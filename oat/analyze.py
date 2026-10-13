@@ -99,6 +99,57 @@ def attendance_dates(text):
     return sorted(out)
 
 
+def spelling_suspects(c, limit=25):
+    """Words that are not in a standard dictionary (typos OR technical terms): evidence only, never scored."""
+    try:
+        from spellchecker import SpellChecker
+    except Exception:
+        return []
+    texts = [m.get("title") or "" for m in c.modules] + [re.sub(r"\.(mp4|mp3|docx|pptx|pdf)$", "", t.get("title") or "", flags=re.I) for t in c.topics]
+    texts += c.grade_names + [(n.get("Title") or "") + " " + re.sub("<[^>]+>", " ", _t(n.get("Body"))) for n in c.news]
+    texts += [(x.get("Name") or "") + " " + re.sub("<[^>]+>", " ", _t(x.get("CustomInstructions")) or _t(x.get("Description")) or "")
+              for x in c.dropbox + c.quizzes + c.forum_topics]
+    words = {}
+    for t in texts:
+        for w in re.findall(r"[A-Za-z][A-Za-z']{4,}", t):
+            if "'" in w or re.search(r"[a-z][A-Z]", w):   # possessives and CamelCase names (ChatGPT) are not typos
+                continue
+            words.setdefault(w.lower(), w)
+    sp = SpellChecker()
+    bad = sorted(sp.unknown(list(words)))
+    return [words[w] for w in bad][:limit]
+
+
+def week_consistency(c):
+    """Do the weekly/unit modules share the same layout (discussion, quiz, files, video, overview)? Returns (fraction, detail)."""
+    from collections import Counter
+    weeks = [m for m in c.top_modules if re.match(r"\s*(week|unit|chapter|module|lesson)\b", m.get("title") or "", re.I)]
+    sigs = {}
+    for m in weeks:
+        kids = [t for t in c.topics if t["module_path"][:1] == m["path"][:1]]
+        urls = " ".join((t.get("url") or "").lower() for t in kids)
+        f = set()
+        if "type=discuss" in urls:
+            f.add("discussion")
+        if "type=quiz" in urls:
+            f.add("quiz")
+        if "type=dropbox" in urls:
+            f.add("dropbox")
+        if any(t.get("type") == "File" for t in kids):
+            f.add("files")
+        if any(":video:" in (t.get("url") or "") for t in kids):
+            f.add("video")
+        if len(re.sub("<[^>]+>", "", m.get("description") or "")) > 40:
+            f.add("overview")
+        sigs[(m.get("title") or "")[:18]] = frozenset(f)
+    if len(sigs) < 3:
+        return None, ""
+    modal, n = Counter(sigs.values()).most_common(1)[0]
+    odd = [k for k, v in sigs.items() if v != modal]
+    return n / len(sigs), f"{n} of {len(sigs)} weekly modules share the layout [{', '.join(sorted(modal)) or 'empty'}]" + \
+        (f"; different: {', '.join(odd[:4])}" if odd else "")
+
+
 def grade_fraction(frac, full=0.9, partial=0.01):
     return "1" if frac >= full else ("0" if frac >= partial else "X")
 
@@ -209,7 +260,18 @@ def analyze(d):
     tot, got = sum(present.values()), sum(min(linked[k], present[k]) for k in present)
     if tot:
         put("3.04", grade_fraction(got / tot, 0.9), f"auto: {got}/{tot} quizzes/dropboxes/discussions linked inside modules (needed for Pulse notifications)")
-    review("3.05", "Broken links/spelling/incorrect info need a person (or a link checker).")
+    lc = d.get("link_check") or []
+    sus = spelling_suspects(c)
+    broken = [x for x in lc if x.get("status") in (404, 410, "dns")]
+    unreach = [x for x in lc if x.get("status") == "unreachable"]
+    if lc:
+        host = lambda u: re.sub(r"^https?://(www\.)?", "", u).split("/")[0]
+        put("3.05", "0" if broken else "1",
+            f"auto: {len(lc)} outside links checked, {len(broken)} broken" + (" (" + ", ".join(sorted({host(x['url']) + ' ' + str(x['status']) for x in broken})[:3]) + ")" if broken else "") +
+            (f", {len(unreach)} unreachable or blocked (not counted)" if unreach else "") +
+            (f"; {len(sus)} words not in the dictionary, see review" if sus else ""))
+    review("3.05", "Only outside links were checked automatically; spelling and incorrect information need a person." +
+           (" Words not in the dictionary (typos or technical terms): " + ", ".join(sus) if sus else ""))
     items = [(x.get("Name") or "", _t(x.get("CustomInstructions")) or _t(x.get("Instructions")) or _t(x.get("Description")))
              for x in c.dropbox + c.quizzes] + [(x.get("Name") or "", _t(x.get("Description"))) for x in c.forum_topics]
     if items:
@@ -220,18 +282,51 @@ def analyze(d):
     if dueable:
         put("3.07", grade_fraction(len(due) / len(dueable), 0.9),
             f"auto: due dates on {len(due)}/{len(dueable)} dropboxes, quizzes and discussion topics")
-    review("3.08", "Navigation being intuitive/consistent is a judgment call (see screenshots).")
+    frac, detail = week_consistency(c)
+    if frac is not None:
+        put("3.08", "1" if frac >= 0.8 else "0" if frac >= 0.5 else "X", "auto: " + detail)
+    review("3.08", "Whether navigation is intuitive is your judgment (see screenshots); the tool only compared the layout of the weekly modules.")
 
     # ---------- Section 4 / 5 (variety) ----------
     work = c.dropbox + c.quizzes + c.forum_topics
     wnames = [((x.get("Name") or ""), (x.get("Name") or "") + " " + re.sub("<[^>]+>", " ", _t(x.get("CustomInstructions")) or _t(x.get("Instructions")) or _t(x.get("Description")) or ""))
               for x in work] + [(t["title"] or "", t["title"] or "") for t in c.topics] + [(g, g) for g in c.grade_names]
 
+    # per-assessment facts for the Section 5 "Course Objective(s)" and "Rubric" columns
+    OBJ = r"objective|outcome|\bSLO|learning goal"
+    info = {}
+    for x in c.dropbox:
+        info[(x.get("Name") or "").strip()] = {"text": _t(x.get("CustomInstructions")), "rubric": bool((x.get("Assessment") or {}).get("Rubrics")), "kind": "dropbox"}
+    for x in c.forum_topics:
+        rc = x.get("_rubric_count")
+        info[(x.get("Name") or "").strip()] = {"text": _t(x.get("Description")), "rubric": (None if rc is None else rc > 0), "kind": "discussion"}
+    for x in c.quizzes:
+        info[(x.get("Name") or "").strip()] = {"text": _t(x.get("Description")) + " " + _t(x.get("Instructions")), "rubric": None, "kind": "quiz"}
+    for p in c.pages:
+        info.setdefault((p.get("title") or "").strip(), {"text": p.get("text", "")[:3000], "rubric": None, "kind": "file"})
+
+    def columns(iid, names):
+        known = [info[n] for n in names if n in info]
+        if not known:
+            return
+        withtext = [k for k in known if k["text"].strip()]
+        if withtext:
+            S[iid]["obj"] = grade_fraction(sum(bool(SEARCH(OBJ, k["text"])) for k in withtext) / len(withtext), 0.9, 0.01)
+        gradable = [k for k in known if k["kind"] in ("dropbox", "discussion") and k["rubric"] is not None]
+        if gradable:
+            S[iid]["rubric"] = grade_fraction(sum(k["rubric"] for k in gradable) / len(gradable), 0.9, 0.01)
+        elif all(k["kind"] == "quiz" for k in known):
+            S[iid]["rubric"] = "NA"
+
     def variety(iid, pat, pool=None, always=None):
         pool = wnames if pool is None else pool
-        hits = sorted({name.strip()[:45] for name, full in pool if SEARCH(pat, full) and name.strip()})[:3]
+        allhits = sorted({name.strip() for name, full in pool if SEARCH(pat, full) and name.strip()})
+        hits = [h[:45] for h in allhits[:3]]
         if always or hits:
             put(iid, "1", "auto: " + (always or "e.g. " + "; ".join(hits)))
+            if iid.startswith("5."):
+                columns(iid, allhits or ([(q.get("Name") or "").strip() for q in c.quizzes] if iid == "5.01" else
+                                         [(x.get("Name") or "").strip() for x in c.forum_topics] if iid == "5.02" else []))
         else:
             put(iid, "X", "auto: no matching activity found by name")
     variety("4.01", r"$^", always=f"{len(c.forum_topics)} discussion topics" if c.forum_topics else None)

@@ -204,6 +204,7 @@ def flatten_toc(modules, trail=()):
         yield from flatten_toc(m.get("Modules") or [], here)
 
 
+CHECK_LINKS = True
 FILE_EXT = (".html", ".htm", ".pdf", ".docx", ".pptx", ".txt")
 MAX_PAGES = 150
 
@@ -226,6 +227,62 @@ def fetch_pages(d2l, topics):
                     "module_path": t["module_path"], "bytes": len(blob),
                     "text": text[:30000], "stats": stats})
     return out
+
+
+def gather_links(data):
+    """Every outside web link found in announcements, descriptions and uploaded files (deduped)."""
+    found = {}
+
+    def add(u, where):
+        u = u.rstrip(".,;)")
+        if u.startswith("http") and "/d2l/" not in u and "jalc.edu" not in u.split("/")[2]:
+            found.setdefault(u, where)
+    for n in data.get("announcements") or []:
+        for u in re.findall(r"https?://[^\s\"'<>)\\]+", json.dumps(n.get("Body"))):
+            add(u, "announcement: " + (n.get("Title") or "")[:40])
+    for m in data.get("modules") or []:
+        for u in re.findall(r"https?://[^\s\"'<>)]+", m.get("description") or ""):
+            add(u, "module: " + (m.get("title") or "")[:40])
+    for t in data.get("topics") or []:
+        add(t.get("url") or "", "content link: " + (t.get("title") or "")[:40])
+        for u in re.findall(r"https?://[^\s\"'<>)]+", t.get("description") or ""):
+            add(u, "topic: " + (t.get("title") or "")[:40])
+    for p in data.get("pages") or []:
+        for u in (p.get("stats") or {}).get("hyperlinks", []):
+            add(u, "file: " + (p.get("title") or "")[:40])
+    return found
+
+
+def check_links(found, limit=120):
+    """HEAD/GET each link from this computer. 404/410/DNS failures are 'broken'; blocked or slow ones are
+    reported separately and are NOT counted as broken."""
+    import socket
+    import urllib.error
+    import urllib.request
+    from concurrent.futures import ThreadPoolExecutor
+    ua = {"User-Agent": "Mozilla/5.0 (OAT link check)"}
+
+    def one(item):
+        url, where = item
+        for method in ("HEAD", "GET"):
+            try:
+                req = urllib.request.Request(url, method=method, headers=ua)
+                with urllib.request.urlopen(req, timeout=12) as r:
+                    return {"url": url, "where": where, "status": r.status}
+            except urllib.error.HTTPError as e:
+                if method == "HEAD" and e.code in (400, 403, 405, 501):
+                    continue
+                return {"url": url, "where": where, "status": e.code}
+            except (urllib.error.URLError, socket.timeout, ConnectionError, OSError) as e:
+                reason = str(getattr(e, "reason", e))
+                kind = "dns" if "Name or service not known" in reason or "getaddrinfo" in reason or "nodename" in reason else "unreachable"
+                if method == "HEAD" and kind == "unreachable":
+                    continue
+                return {"url": url, "where": where, "status": kind}
+        return {"url": url, "where": where, "status": "unreachable"}
+    items = list(found.items())[:limit]
+    with ThreadPoolExecutor(8) as ex:
+        return list(ex.map(one, items))
 
 
 def collect(d2l, org):
@@ -267,6 +324,11 @@ def collect(d2l, org):
     for f in forums:
         f["Topics"] = d2l.get(d2l.le(f"/{org}/discussions/forums/{f['ForumId']}/topics/"),
                               f"topics:{f['ForumId']}")
+    for f in forums:  # how many rubrics are attached to each discussion topic (a count only)
+        for t in f.get("Topics") or []:
+            r = d2l.get(d2l.le(f"/{org}/discussions/forums/{f['ForumId']}/topics/{t['TopicId']}/rubrics"),
+                        f"rubrics:{t['TopicId']}")
+            t["_rubric_count"] = len(r) if isinstance(r, list) else None
     data["forums"] = forums
     data["grade_items"] = d2l.get(d2l.le(f"/{org}/grades/"), "grade_items")
     data["grade_setup"] = d2l.get(d2l.le(f"/{org}/grades/setup/"), "grade_setup")
@@ -277,6 +339,13 @@ def collect(d2l, org):
         {"User": {"DisplayName": (i.get("User") or {}).get("DisplayName")},
          "Role": {"Name": (i.get("Role") or {}).get("Name")}}
         for i in (enr.get("Items") or []) if (i.get("Role") or {}).get("Name") not in (None, "Student")]}
+    try:
+        links = gather_links(data)
+        print(f"Checking {len(links)} outside links...")
+        data["link_check"] = check_links(links) if links and CHECK_LINKS else []
+    except Exception as e:
+        data["link_check"] = []
+        d2l.errors["link_check"] = {"status": 0, "detail": str(e)[:200]}
     data["api_errors"] = d2l.errors
     return data
 
