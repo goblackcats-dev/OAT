@@ -345,7 +345,9 @@ def analyze(d):
 
     # ---------- Section 9 ----------
     q = d.get("qwickly") or {}
-    qtxt = " ".join(f.get("text", "") for f in q.get("frames", []) if f.get("external") or "/d2l/" not in f.get("frame", ""))
+    qframes = q.get("frames", [])
+    ext = [f for f in qframes if f.get("external")]   # an embedded tool from another website, if any
+    qtxt = " ".join(f.get("text", "") for f in (ext or qframes))
     qdates = attendance_dates(qtxt)
     if q.get("found") and qtxt:
         start_end = ((d.get("course") or {}).get("StartDate"), (d.get("course") or {}).get("EndDate"))
