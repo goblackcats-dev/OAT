@@ -337,8 +337,11 @@ def deep_text(page, base=None):
 
 def wait_external(page, base, timeout=40):
     """LTI tools load slowly in a frame from another website. Wait until one has real content."""
-    host, end = _host(base), time.time() + timeout
+    host, start = _host(base), time.time()
+    end = start + timeout
     while time.time() < end:
+        if time.time() - start > 12 and len(page.frames) <= 1:
+            return False  # no embedded frame ever appeared: this is a plain page
         for fr in page.frames:
             h = _host(fr.url)
             if fr.url.startswith("http") and h and h != host:
@@ -353,11 +356,30 @@ def wait_external(page, base, timeout=40):
     return False
 
 
+MENU_JS = """els => els.map(e => ({
+  text: (e.getAttribute('text') || e.getAttribute('aria-label') || e.innerText || e.textContent || '').trim().slice(0, 80),
+  href: e.getAttribute('href') || e.href || ''}))"""
+# Brightspace dropdown items are web components (d2l-menu-item-link), not <a> tags.
+MENU_SEL = "d2l-menu-item-link, d2l-menu-item, d2l-link, [role='menuitem'], [role='link']"
+
+
 def page_links(page):
+    out = []
     try:
-        return page.locator("a").evaluate_all(LINKS_JS)
+        out += page.locator("a").evaluate_all(LINKS_JS)
     except Exception:
-        return []
+        pass
+    try:
+        out += page.locator(MENU_SEL).evaluate_all(MENU_JS)
+    except Exception:
+        pass
+    seen, uniq = set(), []
+    for l in out:
+        k = (l["text"], l["href"])
+        if k not in seen:
+            seen.add(k)
+            uniq.append(l)
+    return uniq
 
 
 def nav_scan(page, base, org):
@@ -437,9 +459,12 @@ def syllabus_and_qwickly(page, base, org, shots_dir):
         res["syllabus_tool"] = open_and_capture(page, syl, shots_dir / "syllabus.png", base)
     if not any(f.get("external") for f in res["syllabus_tool"].get("frames", [])):
         res["syllabus_tool"] = capture_by_click(page, base, org, r"^syllabus$", shots_dir / "syllabus.png")
-    qw = find_link(nav, r"qwickly|attendance")
-    if qw and qw.get("href"):
+    qw = find_link(nav, r"qwickly") or find_link(nav, r"attendance")
+    if qw and qw.get("href") and not qw["href"].startswith("javascript"):
         res["qwickly"] = open_and_capture(page, qw, shots_dir / "qwickly.png", base)
+    j1 = find_link(nav, r"\bJ1\b")
+    if j1 and j1.get("href") and not j1["href"].startswith("javascript"):
+        res["j1"] = open_and_capture(page, j1, shots_dir / "j1.png", base)
     if not any(f.get("external") for f in res["qwickly"].get("frames", [])) and not res["qwickly"].get("found"):
         res["qwickly"] = capture_by_click(page, base, org, r"qwickly|attendance", shots_dir / "qwickly.png")
     return res
@@ -487,6 +512,8 @@ def run_collect(course, base_hint=None, out="out", profile="session", headless=F
         try:
             extra = syllabus_and_qwickly(page, base, org, outdir / "screenshots")
             data["nav"], data["syllabus_tool"], data["qwickly"] = extra["nav"], extra["syllabus_tool"], extra["qwickly"]
+            if extra.get("j1"):
+                data["j1"] = extra["j1"]
         except Exception as e:
             data["qwickly"] = {"found": False, "error": str(e)}
         if shots:

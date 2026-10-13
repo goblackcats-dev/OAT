@@ -67,6 +67,31 @@ class Ctx:
         return sorted({n for n in pool if SEARCH(pat, n)})[:5]
 
 
+_MONTHS = {m: i + 1 for i, m in enumerate("jan feb mar apr may jun jul aug sep oct nov dec".split())}
+
+
+def attendance_dates(text):
+    """Pull calendar dates (e.g. 'Sep 16, 2025', '9/16/2025', '2025-09-16') out of page text."""
+    out = set()
+    for m in re.finditer(r"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.? (\d{1,2})(?:,? (\d{4}))?", text or ""):
+        try:
+            out.add(dt.date(int(m.group(3) or dt.date.today().year), _MONTHS[m.group(1).lower()], int(m.group(2))))
+        except ValueError:
+            pass
+    for m in re.finditer(r"\b(\d{1,2})/(\d{1,2})/(\d{2,4})\b", text or ""):
+        y = int(m.group(3)); y += 2000 if y < 100 else 0
+        try:
+            out.add(dt.date(y, int(m.group(1)), int(m.group(2))))
+        except ValueError:
+            pass
+    for m in re.finditer(r"\b(20\d{2})-(\d{2})-(\d{2})\b", text or ""):
+        try:
+            out.add(dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
+        except ValueError:
+            pass
+    return sorted(out)
+
+
 def grade_fraction(frac, full=0.9, partial=0.01):
     return "1" if frac >= full else ("0" if frac >= partial else "X")
 
@@ -320,13 +345,27 @@ def analyze(d):
 
     # ---------- Section 9 ----------
     q = d.get("qwickly") or {}
-    qtxt = " ".join(f.get("text", "") for f in q.get("frames", []))
+    qtxt = " ".join(f.get("text", "") for f in q.get("frames", []) if f.get("external") or "/d2l/" not in f.get("frame", ""))
+    qdates = attendance_dates(qtxt)
     if q.get("found") and qtxt:
-        put("9.01", "1" if SEARCH(r"present|absent|attendance|session|roster", qtxt) else "0",
-            "auto: Qwickly opened (see screenshots/qwickly.png); confirm sessions are taken on a regular schedule")
-        review("9.01", "Confirm attendance is taken regularly (Qwickly screenshot attached).")
+        start_end = ((d.get("course") or {}).get("StartDate"), (d.get("course") or {}).get("EndDate"))
+        if len(qdates) >= 2:
+            weeks = {x - dt.timedelta(days=x.weekday()) for x in qdates}
+            try:
+                s0 = dt.datetime.fromisoformat(start_end[0].replace("Z", "+00:00")).date()
+                e0 = dt.datetime.fromisoformat(start_end[1].replace("Z", "+00:00")).date()
+            except Exception:
+                s0, e0 = min(qdates), max(qdates)
+            span = ((e0 - dt.timedelta(days=e0.weekday())) - (s0 - dt.timedelta(days=s0.weekday()))).days // 7 + 1
+            frac = min(1.0, len(weeks) / max(1, span))
+            put("9.01", grade_fraction(frac, 0.8, 0.3),
+                f"auto: Qwickly shows {len(qdates)} attendance dates covering {len(weeks)} of {span} course weeks "
+                f"({min(qdates):%m/%d}-{max(qdates):%m/%d}); see screenshots/qwickly.png")
+        else:
+            put("9.01", "0", "auto: Qwickly opened but no attendance dates could be read; see screenshots/qwickly.png")
+        review("9.01", "Confirm attendance was taken for every class meeting (Qwickly screenshot attached).")
     else:
-        review("9.01", "No Qwickly/attendance link exists in this course's navbar, so it could not be opened automatically. Check attendance records by hand, or tell me where you open Qwickly from.")
+        review("9.01", "Qwickly could not be read automatically (it is under Course Performance > Attendance Qwickly). Check attendance records by hand.")
     review("9.02", "Participation visible to students: check the student view of Qwickly / gradebook.")
     gi = [g for g in c.grades if isinstance(g, dict)]
     if gi:
