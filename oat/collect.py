@@ -460,7 +460,29 @@ def capture_by_click(page, base, org, name_pattern, shot_path):
     return out
 
 
-def capture_menu_item(page, base, org, item_pattern, shot_path,
+def qwickly_records(page, base):
+    """Qwickly's default page lists students by name. So: open the Records tab and keep ONLY the calendar
+    dates found on it. No page text and no screenshot of Qwickly is ever stored."""
+    from .analyze import attendance_dates
+    out = {"records_opened": False, "dates": []}
+    try:
+        for loc in (page.get_by_role("link", name=re.compile(r"^\s*records\s*$", re.I)),
+                    page.get_by_role("button", name=re.compile(r"^\s*records\s*$", re.I)),
+                    page.get_by_text(re.compile(r"^\s*Records\s*$"))):
+            if loc.count() > 0:
+                loc.first.click(timeout=6000)
+                out["records_opened"] = True
+                break
+        settle(page, 5)
+        text = " ".join(f["text"] for f in deep_text(page, base))
+        out["dates"] = sorted({d.isoformat() for d in attendance_dates(text)})
+        out["page_chars_read"] = len(text)
+    except Exception as e:
+        out["error"] = str(e)[:200]
+    return out
+
+
+def capture_menu_item(page, base, org, item_pattern, shot_path, privacy=False,
                       menus=("Course Performance", "Tools", "More", "Communication", "Assessments")):
     """Open a navbar dropdown and CLICK an item that has no web address (it opens through script).
     Handles the item loading in the same tab or in a new tab/window."""
@@ -495,10 +517,13 @@ def capture_menu_item(page, base, org, item_pattern, shot_path,
                 page.wait_for_timeout(500)
             settle(target)
             out["external_loaded"] = wait_external(target, base)
-            target.screenshot(path=str(shot_path), full_page=True)
-            out["url"] = target.url
+            out["url"] = target.url.split("?")[0]
             out["new_tab"] = target is not page
-            out["frames"] = deep_text(target, base)
+            if privacy:   # attendance tools show student names: keep dates only
+                out["records"] = qwickly_records(target, base)
+            else:
+                target.screenshot(path=str(shot_path), full_page=True)
+                out["frames"] = deep_text(target, base)
             if target is not page:
                 target.close()
             return out
@@ -574,19 +599,17 @@ def syllabus_and_qwickly(page, base, org, shots_dir, login=None):
     qw = find_link(nav, r"qwickly") or find_link(nav, r"attendance")
     print("Opening Qwickly attendance..." if qw else "No Qwickly link found in the menus.")
     if qw and qw.get("href") and not qw["href"].startswith("javascript"):
-        res["qwickly"] = open_and_capture(page, qw, shots_dir / "qwickly.png", base)
-    if qw and not res["qwickly"].get("frames"):
+        res["qwickly"] = {"found": True, "link_text": qw["text"]}
+        try:
+            page.goto(__import__("urllib.parse", fromlist=["urljoin"]).urljoin(base + "/", qw["href"]), wait_until="domcontentloaded", timeout=40000)
+            settle(page)
+            wait_external(page, base)
+            res["qwickly"]["records"] = qwickly_records(page, base)
+        except Exception as e:
+            res["qwickly"]["error"] = str(e)[:200]
+    if qw and not res["qwickly"].get("records"):
         print("Qwickly has no web address, so clicking it from the menu...")
-        res["qwickly"] = capture_menu_item(page, base, org, r"qwickly", shots_dir / "qwickly.png")
-    j1 = find_link(nav, r"\bJ1\b")
-    if j1:
-        print("Opening J1 Grades & Attendance...")
-        if j1.get("href") and not j1["href"].startswith("javascript"):
-            res["j1"] = open_and_capture(page, j1, shots_dir / "j1.png", base)
-        if not res.get("j1", {}).get("frames"):
-            res["j1"] = capture_menu_item(page, base, org, r"\bJ1\b", shots_dir / "j1.png")
-    if not any(f.get("external") for f in res["qwickly"].get("frames", [])) and not res["qwickly"].get("found"):
-        res["qwickly"] = capture_by_click(page, base, org, r"qwickly|attendance", shots_dir / "qwickly.png")
+        res["qwickly"] = capture_menu_item(page, base, org, r"qwickly", None, privacy=True)
     return res
 
 
@@ -633,8 +656,6 @@ def run_collect(course, base_hint=None, out="out", profile="session", headless=F
         try:
             extra = syllabus_and_qwickly(page, base, org, outdir / "screenshots", login)
             data["nav"], data["syllabus_tool"], data["qwickly"] = extra["nav"], extra["syllabus_tool"], extra["qwickly"]
-            if extra.get("j1"):
-                data["j1"] = extra["j1"]
             if extra.get("syllabus_direct"):
                 data["syllabus_direct"] = extra["syllabus_direct"]
         except Exception as e:

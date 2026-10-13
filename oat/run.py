@@ -13,16 +13,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import analyze, content, creds, pdf_fill
+from . import analyze, content, creds, evidence, pdf_fill
 from .collect import run_collect
 
 DEFAULT_BASE = "https://learn.jalc.edu"
 CONFIG = Path.home() / ".oat_config.json"
-CONFIRMATIONS = [
-    ("1.23", "Do you confirm that all necessary copyright clearance has been obtained for all material in this course?"),
-    ("7.05", "Do you review learner feedback and adjust the course in response?"),
-    ("8.01", "Do you confirm external tools/publisher materials meet accessibility standards?"),
-]
 
 
 def resource(name):
@@ -74,23 +69,55 @@ def finish(a, data):
         attach_syllabus(data, a.syllabus)
     result = analyze.analyze(data)
     org = data["orgUnitId"]
-    print("\nVerbal confirmations (only you can give these; answer honestly, or 'skip' to leave blank):")
-    for iid, q in CONFIRMATIONS:
-        ans = True if a.yes_confirm else ask_yn(q)
+    ev = evidence.collect(data, result)
+
+    # --- the three instructor-only confirmations: evidence first, then YOUR answer ---
+    answers_in = {}
+    if getattr(a, "answers", None):
+        answers_in = json.loads(Path(a.answers.strip('"')).read_text())
+    answers = {}
+    print("\nThree confirmations only you can give. The tool shows evidence, then records YOUR answer.")
+    for iid, key, q in evidence.QUESTIONS:
+        print(f"\n[{iid}] {q}")
+        for line in ev[key]:
+            print("   -", line[:230])
+        if key in answers_in:
+            raw = str(answers_in[key]).strip().lower()
+            ans = True if raw in ("yes", "y", "true") else False if raw in ("no", "n", "false") else None
+        elif getattr(a, "skip_questions", False):
+            ans = None
+        elif getattr(a, "yes_confirm", False):   # test only
+            ans = True
+        else:
+            ans = ask_yn("Your answer")
+        answers[key] = ans
         if ans is True:
-            result["items"][iid] = {"score": "1", "note": "instructor verbally confirmed"}
-            result["review"] = [r for r in result["review"] if r["id"] != iid]
+            result["items"][iid] = {"score": "1", "note": "instructor confirmed (own answer; evidence shown)"}
         elif ans is False:
             result["items"][iid] = {"score": "X", "note": "instructor did not confirm"}
-            result["review"] = [r for r in result["review"] if r["id"] != iid]
+        if ans is not None:
+            result["review"] = [x for x in result["review"] if x["id"] != iid]
+        elif not any(x["id"] == iid for x in result["review"]):
+            result["review"].append({"id": iid, "reason": "Unanswered instructor confirmation (see evidence in review.md)."})
+    result["verbal_answers"] = answers
+
+    # --- drafted text for the rubric's last page (only if empty) ---
+    for k, v in evidence.draft_summary(result).items():
+        if not result.get(k):
+            result[k] = v
 
     outdir = Path(a.out) / org
     outdir.mkdir(parents=True, exist_ok=True)
     (outdir / "scores.json").write_text(json.dumps(result, indent=2))
     analyze.write_review(result, analyze.copyright_report(data), outdir / "review.md")
+    with open(outdir / "review.md", "a") as f:
+        f.write(evidence.evidence_markdown(ev))
+    prompt = outdir / "claude_prompt.md"
+    prompt.write_text(evidence.build_prompt(data, result, ev, answers))
     pdf = outdir / f"OAT_Rubric_{org}.pdf"
     pdf_fill.build(result, str(resource("rubric.pdf")), str(pdf))
-    print(f"\nDone.\n  Filled rubric : {pdf}\n  Review report : {outdir / 'review.md'}\n  Scores (editable): {outdir / 'scores.json'}")
+    print(f"\nDone.\n  Filled rubric : {pdf}\n  Review report : {outdir / 'review.md'}\n"
+          f"  Prompt for Claude (upload with scores.json): {prompt}\n  Scores (editable): {outdir / 'scores.json'}")
     print("To change a score, edit scores.json and run:  OAT.exe --refill", org)
     open_file(pdf)
 
@@ -106,6 +133,8 @@ def main():
     ap.add_argument("--out", default="OAT_output")
     ap.add_argument("--headless", action="store_true")
     ap.add_argument("--browser-path")
+    ap.add_argument("--answers", metavar="FILE", help='JSON with your own answers, e.g. {"copyright":"yes","feedback":"no","accessibility":"skip"}')
+    ap.add_argument("--skip-questions", action="store_true", help="do not ask the three confirmations (they stay unanswered)")
     ap.add_argument("--yes-confirm", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args()
 

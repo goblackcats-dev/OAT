@@ -35,3 +35,14 @@ Double-click `OAT.bat` (needs Python), or use `OAT.exe` from the GitHub Actions 
 First run asks for the course URL and offers to save your D2L login in the Windows Credential
 Manager (never in a file). Update it any time with `OAT.exe --set-login`; remove with `--forget-login`.
 Output goes to `OAT_output/<course id>/`: the filled PDF, `review.md`, and editable `scores.json`.
+
+## The three confirmations and the Claude prompt
+Copyright (1.23), learner feedback (7.05) and external-tool accessibility (8.01) are the instructor's own statements.
+The tool shows evidence for each, then records YOUR answer: type it when asked, or put it in a file and pass
+`--answers answers.json` (`{"copyright":"yes","feedback":"no","accessibility":"skip"}`), or `--skip-questions`
+to leave them unanswered. Every run also writes `OAT_output/<id>/claude_prompt.md`: upload it with `scores.json`
+to Claude and ask it to review the scores and finish the PDF.
+
+## Privacy
+No student names or emails are stored. Qwickly (which lists students) is read for attendance dates only, with no
+page text or screenshot kept. J1/Jenzabar is not read at all.

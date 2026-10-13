@@ -43,8 +43,12 @@ class Ctx:
                       if f.get("external") or (f.get("frame") and "/d2l/" not in f["frame"])]
         self.syl_file = (d.get("syllabus_tool") or {}).get("source") == "file"
         self.syl_error = (not self.syl_file) and any(SEARCH(ERR, f.get("text", "")) for f in syl_frames)
+        def _syllabus_like(t):
+            hits = sum(bool(SEARCH(p, t)) for p in (r"objectives?|outcomes", r"office hours", r"required (text|materials)|textbook",
+                                                      r"grading|grade scale", r"schedule|calendar", r"policy|policies"))
+            return len(t) > 1500 and hits >= 3
         direct = [f for f in (d.get("syllabus_direct") or {}).get("frames", [])
-                  if len(f.get("text", "")) > 400 and not SEARCH(ERR, f.get("text", ""))]
+                  if _syllabus_like(f.get("text", "")) and not SEARCH(ERR, f.get("text", ""))]
         self.syl_direct = bool(direct)
         self.syl_tool = " ".join(f.get("text", "") for f in syl_frames + direct if not SEARCH(ERR, f.get("text", "")))
         self.syllabus = (" ".join(p["text"] for p in self.pages if SEARCH("syllabus", p["title"] + p["url"]))
@@ -126,7 +130,7 @@ def analyze(d):
         or (d.get("syllabus_tool") or {}).get("found")
     if c.syl_error:
         review("1.01", "The Syllabus tab opens Simple Higher Ed, which showed the error 'could not locate a matching account' for your login" +
-               (" (the direct-login button did work; see screenshots/syllabus_direct.png, and confirm it shows YOUR course's syllabus)" if c.syl_direct else "") +
+               (" (the direct-login worked, but it opened the Simple Syllabus dashboard, not your course's syllabus: open ADN 207 there, choose View or Print, save it as a PDF, and rerun with --syllabus)" if (d.get("syllabus_direct") or {}).get("found") and not c.syl_direct else "") +
                ". Check with the Teaching and Learning Center, and confirm that students can open the syllabus. Not scored automatically.")
     elif syl_pages or syl_topics or nav_syl:
         put("1.01", "1", "auto: syllabus found" + (" (Syllabus tool in the course navbar)" if nav_syl else ": " + (syl_pages or syl_topics)[0].get("title", "")))
@@ -349,29 +353,29 @@ def analyze(d):
 
     # ---------- Section 9 ----------
     q = d.get("qwickly") or {}
-    qframes = q.get("frames", [])
-    ext = [f for f in qframes if f.get("external")]   # an embedded tool from another website, if any
-    qtxt = " ".join(f.get("text", "") for f in (ext or qframes))
-    qdates = attendance_dates(qtxt)
-    if q.get("found") and qtxt:
-        start_end = ((d.get("course") or {}).get("StartDate"), (d.get("course") or {}).get("EndDate"))
-        if len(qdates) >= 2:
-            weeks = {x - dt.timedelta(days=x.weekday()) for x in qdates}
-            try:
-                s0 = dt.datetime.fromisoformat(start_end[0].replace("Z", "+00:00")).date()
-                e0 = dt.datetime.fromisoformat(start_end[1].replace("Z", "+00:00")).date()
-            except Exception:
-                s0, e0 = min(qdates), max(qdates)
-            span = ((e0 - dt.timedelta(days=e0.weekday())) - (s0 - dt.timedelta(days=s0.weekday()))).days // 7 + 1
-            frac = min(1.0, len(weeks) / max(1, span))
-            put("9.01", grade_fraction(frac, 0.8, 0.3),
-                f"auto: Qwickly shows {len(qdates)} attendance dates covering {len(weeks)} of {span} course weeks "
-                f"({min(qdates):%m/%d}-{max(qdates):%m/%d}); see screenshots/qwickly.png")
-        else:
-            put("9.01", "0", "auto: Qwickly opened but no attendance dates could be read; see screenshots/qwickly.png")
-        review("9.01", "Confirm attendance was taken for every class meeting (Qwickly screenshot attached).")
+    rec = q.get("records") or {}
+    qdates = [dt.date.fromisoformat(x) for x in rec.get("dates", [])]
+    try:  # only dates inside the course's own window count (the page also shows today's date etc.)
+        cs = dt.datetime.fromisoformat(d["course"]["StartDate"].replace("Z", "+00:00")).date()
+        ce = dt.datetime.fromisoformat(d["course"]["EndDate"].replace("Z", "+00:00")).date()
+        qdates = [x for x in qdates if cs - dt.timedelta(days=3) <= x <= ce + dt.timedelta(days=3)]
+    except Exception:
+        cs = ce = None
+    if q.get("found") and len(qdates) >= 2:
+        s0, e0 = (cs, ce) if cs and ce else (min(qdates), max(qdates))
+        weeks = {x - dt.timedelta(days=x.weekday()) for x in qdates}
+        span = ((e0 - dt.timedelta(days=e0.weekday())) - (s0 - dt.timedelta(days=s0.weekday()))).days // 7 + 1
+        put("9.01", grade_fraction(min(1.0, len(weeks) / max(1, span)), 0.8, 0.3),
+            f"auto: Qwickly Records show {len(qdates)} attendance dates covering {len(weeks)} of {span} course weeks "
+            f"({min(qdates):%m/%d}-{max(qdates):%m/%d})")
+        review("9.01", "Confirm attendance was taken for every class meeting.")
+    elif q.get("found"):
+        review("9.01", "Qwickly opened" + (" and its Records tab was read" if rec.get("records_opened") else "") +
+               ", but no attendance dates inside this course's dates were found" +
+               (" (the course may have ended, or the roster is empty)" if True else "") +
+               ". Check the attendance records by hand. Qwickly was not captured because it lists student names.")
     else:
-        review("9.01", "Qwickly could not be read automatically (it is under Course Performance > Attendance Qwickly). Check attendance records by hand.")
+        review("9.01", "Qwickly could not be opened automatically (Course Performance > Attendance Qwickly). Check attendance records by hand.")
     review("9.02", "Participation visible to students: check the student view of Qwickly / gradebook.")
     gi = [g for g in c.grades if isinstance(g, dict)]
     if gi:
