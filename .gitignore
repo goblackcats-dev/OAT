@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 out/
 session/
+OAT_output/
+build/
+dist/
+*.spec

@@ -1,0 +1,26 @@
+name: Build OAT.exe
+on:
+  push:
+    branches: [claude/modest-davinci-4t93v4]
+    paths: ["oat/**", "OAT_main.py", "rubric.pdf", "requirements.txt", ".github/workflows/build-exe.yml"]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pyinstaller
+      - name: Test the rubric filler
+        run: python -m oat.pdf_fill examples/sample_scores.json rubric.pdf sample_filled.pdf
+      - name: Build exe
+        run: >
+          pyinstaller --onefile --name OAT --collect-all playwright
+          --collect-submodules keyring --hidden-import keyring.backends.Windows
+          --add-data "rubric.pdf;." OAT_main.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OAT-windows
+          path: dist/OAT.exe
